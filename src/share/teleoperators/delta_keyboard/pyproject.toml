@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lerobot_teleoperator_delta_keyboard"
+version = "0.0.4"
+description = "LeRobot XArm integration"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "lerobot>=0.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lerobot_teleoperator_delta_keyboard"]
+exclude = ["*.egg-info"]

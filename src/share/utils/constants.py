@@ -1,0 +1,1 @@
+DEFAULT_ROBOT_NAME = "main"

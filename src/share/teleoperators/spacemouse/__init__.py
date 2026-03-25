@@ -1,0 +1,1 @@
+from share.teleoperators.spacemouse.lerobot_teleoperator_spacemouse import SpacemouseConfig, SpaceMouse
