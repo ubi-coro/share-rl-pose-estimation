@@ -1,26 +1,57 @@
 # share-rl
 
-`share-rl` is a LeRobot v5 extension focused on structured manipulation workflows.
+`share-rl` is a LeRobot extension for structured manipulation workflows.
 
-It packages:
+The repository adds four main things on top of LeRobot:
 
-- manipulation primitive environments and processor pipelines with task-frame constraints
-- manipulation primitive nets (MP-Nets) for graph-structured high-level behavior
-- an interactive workspace CLI that acts as a bounded coding/programming agent for MP-Nets
-- experimental offline RL policy code under `src/share/policies`
-- hardware integrations for UR and ViperX-style robots, plus LeRobot-compatible teleoperation hooks
+- new robot and teleoperator integrations, packaged as sibling installable Python projects
+- task-frame manipulation primitives and manipulation-primitive nets (MP-Nets) for graph-structured behavior
+- recording, training, and offline evaluation helpers around those MP-Nets
+- a local-first workspace/runtime layer for editing and reasoning about MP-Nets programmatically
 
-## Status
+This README is written for someone who wants to use the repo, understand what is installable, and see the intended MP-Net usage pattern.
 
-This repository is installable and documented for release-oriented use, but not every subsystem is equally mature.
+## What You Get
 
-- Ready to package and install: the `share` Python package, MP-Net/env code, workspace CLI, and the standalone robot packages `lerobot_robot_ur`, `lerobot_robot_urV2`, and `lerobot_robot_viper`
-- Still experimental: most code under `src/share/workspace` and `src/share/policies`
-- Placeholder-only today: the namespace folders under `src/share/teleoperators` do not yet contain standalone teleoperator implementations in this repo
+From the root `share-rl` package itself you get:
+
+- `share.envs.manipulation_primitive`: a single manipulation primitive environment with task-frame constraints, processor pipelines, and intervention logic
+- `share.envs.manipulation_primitive_net`: a graph of primitives plus transitions, start/reset semantics, and MP-Net validation
+- `share.workspace.mpnet`: helpers to create, save, load, validate, summarize, and edit MP-Net configs
+- `share.scripts.record`: record datasets from MP-Nets with per-primitive datasets and optional per-primitive policies
+- `share.scripts.train`: thin adapter for training policies on recorded datasets
+- `share.scripts.eval_on_dataset`: lightweight offline evaluation/summary adapter for recorded primitive datasets
+
+From the sibling standalone packages in this repo you can also get:
+
+- `lerobot_robot_ur`: UR e-series integration
+- `lerobot_robot_viperx`: Trossen ViperX integration
+- `lerobot_teleoperator_delta_keyboard`: keyboard delta-velocity teleoperation
+- `lerobot_teleoperator_spacemouse`: SpaceMouse teleoperation
+- `lerobot_teleoperator_widowx`: WidowX leader-arm style teleoperation
+
+Those sibling packages are installed through the root extras when you install from this repo checkout.
+
+## Current Status
+
+What is already useful:
+
+- MP-Net config objects, transitions, serialization, and validation
+- manipulation-primitive processor stack
+- UR, ViperX, keyboard, SpaceMouse, and WidowX integration code
+- dataset recording, training adapter, and dataset-summary evaluation adapter
+
+What is still more experimental:
+
+- some policy code under `src/share/policies`
+- the broader workspace/agent tooling under `src/share/workspace`
+- packaging polish for publishing the sibling subprojects independently outside this monorepo checkout
 
 ## Installation
 
-Python 3.12 is a good default for this repo.
+The repository currently targets Python 3.10+ and LeRobot `>=0.5`.
+
+A typical local setup is:
 
 ```bash
 conda create -n share python=3.12
@@ -28,55 +59,218 @@ conda activate share
 pip install -e .
 ```
 
-The package pins LeRobot to the v5 line and supports optional extras:
+### Optional extras
+
+These extras are designed for use from this repository checkout.
 
 ```bash
-pip install -e ".[ur]"
-pip install -e ".[spacemouse]"
-pip install -e ".[aloha]"
-pip install -e ".[all]"
+pip install -e .[ur]
+pip install -e .[spacemouse]
+pip install -e .[aloha]
+pip install -e .[all]
 ```
 
-What each extra is for:
+What each extra does:
 
-- `ur`: UR RTDE dependencies and low-level synchronization helpers
-- `spacemouse`: SpaceMouse teleoperation dependency expected by the LeRobot-style stack
-- `aloha`: Dynamixel/serial dependencies commonly needed for Aloha or ViperX-style hardware
-- `all`: union of `ur`, `spacemouse`, and `aloha`
+- `.[ur]`: installs the root `share` package plus the sibling `lerobot_robot_ur` project from `src/share/robots/ur`
+- `.[spacemouse]`: installs the root `share` package plus the sibling `lerobot_teleoperator_spacemouse` project from `src/share/teleoperators/spacemouse`
+- `.[aloha]`: installs the root `share` package plus the sibling `lerobot_robot_viperx` and `lerobot_teleoperator_widowx` projects
+- `.[all]`: installs the three hardware extras above plus test dependencies
 
-For development and tests:
+If you want one sibling package directly, you can also install it by path:
 
 ```bash
-pip install -r requirements-dev.txt
-pytest
+pip install -e src/share/robots/ur
+pip install -e src/share/teleoperators/spacemouse
 ```
 
 ## Installed Commands
 
-Editable install exposes a few convenient entry points:
+The root package currently exposes:
 
 - `share-record`
 - `share-train`
 - `share-eval`
-- `share-workspace`
 
-The workspace shell is the interactive interface for building and inspecting MP-Nets:
+The root `pyproject.toml` also declares `share-workspace`, but this checkout currently does not contain the `share.scripts.robot_workspace` wrapper module. The workspace functionality is present as Python modules under `share.workspace`, but that CLI wrapper is currently in flux.
 
-```bash
-share-workspace --workspace ./workspace --project demo --task pick-place
+## Core Concepts
+
+### Manipulation primitive
+
+A manipulation primitive is one locally coherent behavior with:
+
+- one or more task frames
+- processor settings
+- an optional policy
+- optional notes and task description
+- an `is_terminal` flag
+
+### Task frame
+
+A `TaskFrame` defines the control contract for one robot inside a primitive:
+
+- target pose or joint target
+- command space: `TASK` or `JOINT`
+- per-axis control mode: `POS`, `VEL`, or `WRENCH`
+- per-axis policy mode: `ABSOLUTE`, `RELATIVE`, or `None`
+- gains and min/max bounds
+
+Only axes whose `policy_mode` is not `None` are learnable by a policy.
+
+### MP-Net
+
+A manipulation-primitive net is a directed graph with:
+
+- `start_primitive`
+- `reset_primitive`
+- a dictionary of named primitives
+- a list of transitions between primitives
+
+The config validates several invariants for you, including:
+
+- transition sources and targets must exist
+- non-terminal primitives must have outgoing edges
+- terminal primitives must be reachable from `start_primitive`
+
+## Minimal MP-Net Example
+
+This is a small, faithful example of the intended usage pattern: define primitives, define transitions, then save the config as JSON.
+
+```python
+from pathlib import Path
+
+from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
+from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TaskFrame
+from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
+from share.envs.manipulation_primitive_net.transitions import OnSuccess
+from share.utils.constants import DEFAULT_ROBOT_NAME
+from share.workspace.mpnet import save_mpnet_config, summarize_mpnet
+
+approach = ManipulationPrimitiveConfig(
+    task_frame={
+        DEFAULT_ROBOT_NAME: TaskFrame(
+            target=[0.0, 0.0, 0.15, 0.0, 0.0, 0.0],
+            control_mode=[ControlMode.POS] * 6,
+            policy_mode=[PolicyMode.RELATIVE, PolicyMode.RELATIVE, PolicyMode.RELATIVE, None, None, None],
+            min_pose=[-0.10, -0.10, 0.05, -0.5, -0.5, -0.5],
+            max_pose=[0.10, 0.10, 0.25, 0.5, 0.5, 0.5],
+        )
+    },
+    notes="Approach the object from above.",
+    task_description="approach object",
+    is_terminal=False,
+)
+
+close_gripper = ManipulationPrimitiveConfig(
+    task_frame={
+        DEFAULT_ROBOT_NAME: TaskFrame(
+            target=[0.0, 0.0, 0.10, 0.0, 0.0, 0.0],
+            control_mode=[ControlMode.POS] * 6,
+            policy_mode=[None] * 6,
+        )
+    },
+    notes="Close and settle.",
+    task_description="close gripper",
+    is_terminal=True,
+)
+
+mpnet = ManipulationPrimitiveNetConfig(
+    start_primitive="approach",
+    reset_primitive="approach",
+    fps=10,
+    robot=None,
+    teleop=None,
+    primitives={
+        "approach": approach,
+        "close_gripper": close_gripper,
+    },
+    transitions=[
+        OnSuccess(source="approach", target="close_gripper", additional_reward=1.0),
+    ],
+)
+
+summary = summarize_mpnet(mpnet)
+print(summary["primitives"])
+
+save_mpnet_config(mpnet, Path("mpnets/pick.json"))
+```
+
+The key pattern is:
+
+1. define a `TaskFrame` for each robot involved in a primitive
+2. wrap those task frames in a `ManipulationPrimitiveConfig`
+3. connect primitives with explicit transition objects
+4. build a `ManipulationPrimitiveNetConfig`
+5. save it as JSON with `save_mpnet_config`
+
+If you want a one-node starter template instead, use:
+
+```python
+from share.workspace.mpnet import create_template_mpnet, save_mpnet_config
+
+config = create_template_mpnet("main")
+save_mpnet_config(config, "mpnets/template.json")
+```
+
+## Using the Runtime Pieces
+
+### Recording
+
+`share-record` runs an MP-Net environment, routes teleop/policy actions through the processor stack, and writes one dataset per adaptive primitive.
+
+At a high level it:
+
+- builds a `ManipulationPrimitiveNet`
+- creates one dataset per adaptive primitive
+- optionally loads one policy per adaptive primitive
+- steps the active primitive
+- stores transitions in the corresponding primitive dataset
+
+### Training
+
+`share-train` is a thin adapter around LeRobot training. It builds a train config from a policy checkpoint and a dataset location, then delegates to LeRobot’s training entrypoint.
+
+### Evaluation
+
+`share-eval` is a lightweight dataset-summary pass. It reads recorded primitive datasets and emits a compact summary JSON with counts and available metadata.
+
+## Typical Package Imports
+
+Single-robot usage usually touches:
+
+```python
+from share.envs.manipulation_primitive.task_frame import TaskFrame, ControlMode, PolicyMode
+from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
+from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
+```
+
+If you are using local hardware integrations from this repo checkout, common imports are:
+
+```python
+from share.robots.ur import URConfig, UR
+from share.teleoperators.delta_keyboard import KeyboardVelocityTeleopConfig, KeyboardVelocityTeleop
+```
+
+And if you want the standalone LeRobot-style sibling package imports after installing the corresponding extras:
+
+```python
+from lerobot_robot_ur import URConfig, UR
+from lerobot_teleoperator_spacemouse import SpacemouseConfig, SpaceMouse
 ```
 
 ## Repository Layout
 
-- `src/share/envs`: manipulation primitive envs, configs, transitions, processor steps
-- `src/share/workspace`: bounded interactive agent/runtime for MP-Net authoring
-- `src/share/policies`: offline RL and value/policy modeling experiments
-- `src/share/robots`: UR and Viper robot packages
-- `src/share/scripts`: recording, training, evaluation, and workspace CLIs
-- `tests`: focused unit tests and smoke coverage
+- `src/share/envs`: manipulation primitives, MP-Nets, task frames, transitions
+- `src/share/processor`: observation/action/info processing steps used by the env stack
+- `src/share/workspace`: MP-Net persistence, summaries, structured editing helpers, and agent/runtime building blocks
+- `src/share/scripts`: recording, training, and evaluation entrypoints
+- `src/share/robots`: sibling installable robot packages plus `share` namespace facades
+- `src/share/teleoperators`: sibling installable teleoperator packages plus `share` namespace facades
+- `tests`: release-readiness, env, policy, and workspace tests
 
-## Notes
+## Important Caveats
 
-- The codebase assumes LeRobot v5 APIs.
-- If you manage PyTorch/CUDA manually, install the compatible torch build for your machine before running training-heavy workflows.
-- `share-workspace --voice` is optional and still requires `SpeechRecognition` plus working microphone/audio support; it is not bundled into the default install.
+- The extras in the root package currently use local sibling-package references. They are ideal for working from this monorepo checkout, but they are not yet the final pattern you would want for publishing all pieces independently on PyPI.
+- Some of the sibling standalone packages still import `share.*` internals. That is fine when you install from this repository, but it means the subprojects are not fully decoupled yet.
+- The workspace/runtime code is present and useful as a library, but the CLI packaging around it is still being stabilized.

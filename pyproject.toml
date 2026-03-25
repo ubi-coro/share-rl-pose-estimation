@@ -48,16 +48,14 @@ dependencies = [
 
 [project.optional-dependencies]
 ur = [
-    "ur_rtde==1.6.2",
+    "lerobot_robot_ur @ file:src/share/robots/ur",
 ]
 spacemouse = [
-    "easyhid==0.0.10",
-    "atomics==1.0.3",
+    "lerobot_teleoperator_spacemouse @ file:src/share/teleoperators/spacemouse",
 ]
 aloha = [
-    "dynamixel-sdk>=3.7.31,<3.9.0",
-    "pyserial>=3.5,<4.0",
-    "modern_robotics>=1.1.1,<2.0.0",
+    "lerobot_robot_viperx @ file:src/share/robots/viperx",
+    "lerobot_teleoperator_widowx @ file:src/share/teleoperators/widowx",
 ]
 test = [
     "pytest>=8.1.0,<9.0.0",
