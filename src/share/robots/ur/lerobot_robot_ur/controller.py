@@ -11,7 +11,7 @@ from multiprocessing.managers import SharedMemoryManager
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TaskFrame
+from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, PolicyMode, TaskFrame
 from share.utils.shared_memory import SharedMemoryRingBuffer, SharedMemoryQueue, Empty
 
 
@@ -70,6 +70,13 @@ class TaskFrameCommand(TaskFrame):
 
     def to_robot_action(self):
         action_dict = {}
+        if self.space == ControlSpace.JOINT:
+            for i in range(len(self.target)):
+                if self.control_mode[i] != ControlMode.POS:
+                    raise ValueError("UR joint-space control only supports POS axes")
+                action_dict[f"joint_{i + 1}.pos"] = self.target[i]
+            return action_dict
+
         for i, ax in enumerate(["x", "y", "z", "rx", "ry", "rz"]):
             if self.control_mode[i] == ControlMode.POS:
                 action_dict[f"{ax}.ee_pos"] = self.target[i]
@@ -198,6 +205,7 @@ class RTDETaskFrameController(mp.Process):
         self.kd = self._last_cmd.kd
         self.max_pose = self._last_cmd.max_pose
         self.min_pose = self._last_cmd.min_pose
+        self._active_space: ControlSpace | None = None
 
     # =========== launch & shutdown =============
     def connect(self):
@@ -264,8 +272,185 @@ class RTDETaskFrameController(mp.Process):
         Args:
             cmd (TaskFrameCommand): Partial or full command to apply.
         """
+        self._ensure_control_space(cmd.space)
         self._last_cmd = cmd
         self.robot_cmd_queue.put(cmd.to_queue_dict())
+
+    def _ensure_control_space(self, space: ControlSpace | int) -> ControlSpace:
+        """Lock the controller to its first commanded control space."""
+        resolved = ControlSpace(int(space))
+        if self._active_space is None:
+            self._active_space = resolved
+            return resolved
+        if resolved != self._active_space:
+            raise ValueError(
+                "UR controller does not support switching between task-space and joint-space control"
+            )
+        return resolved
+
+    def _compute_joint_torque(
+        self,
+        q_cmd: np.ndarray,
+        q_actual: np.ndarray,
+        qd_actual: np.ndarray,
+    ) -> np.ndarray:
+        """Compute joint torques from a simple impedance control law."""
+        kp = np.asarray(self.kp, dtype=np.float64)
+        kd = np.asarray(self.kd, dtype=np.float64)
+        return kp * (q_cmd - q_actual) - kd * qd_actual
+
+    @staticmethod
+    def _send_joint_torque(rtde_c, torque_cmd: np.ndarray) -> None:
+        """Send torques through the available UR RTDE joint-torque API."""
+        torque = np.asarray(torque_cmd, dtype=np.float64).tolist()
+        if hasattr(rtde_c, "directTorque"):
+            rtde_c.directTorque(torque, True)
+        elif hasattr(rtde_c, "torqueCommand"):
+            rtde_c.torqueCommand(torque, True)
+        else:
+            raise AttributeError("RTDEControlInterface does not expose directTorque/torqueCommand")
+
+    def _compute_task_wrench(
+        self,
+        x_cmd: np.ndarray,
+        pose_F: np.ndarray,
+        v_F: np.ndarray,
+        measured_wrench_F: np.ndarray,
+    ) -> np.ndarray:
+        """Compute a bounded task-space wrench from the impedance control law."""
+        wrench_F = np.zeros(6, dtype=np.float64)
+        err_vec = np.zeros(6, dtype=np.float64)
+        err_vec[:3] = x_cmd[:3] - np.array(pose_F[:3])
+
+        R_cmd = R.from_rotvec(x_cmd[3:6])
+        R_act = R.from_rotvec(pose_F[3:6])
+        R_err = R_cmd * R_act.inv()
+        err_vec[3:6] = R_err.as_rotvec()
+
+        for i in range(6):
+            control_mode_i = ControlMode(self.control_mode[i])
+
+            if control_mode_i == ControlMode.WRENCH:
+                wrench_F[i] = float(self.target[i])
+                continue
+
+            if control_mode_i == ControlMode.POS:
+                e = float(err_vec[i])
+                edot = float(-v_F[i])
+            elif control_mode_i == ControlMode.VEL:
+                e = 0.0
+                edot = float(self.target[i] - v_F[i])
+            else:
+                e = 0.0
+                edot = 0.0
+
+            if (
+                self.config.compliance_safety_mode == "reference_limits"
+                and self.config.compliance_safety_enable[i]
+            ):
+                e, edot = self.clip_reference_errors(e, edot, i)
+
+            wrench_F[i] = self.kp[i] * e + self.kd[i] * edot
+
+        self.apply_wrench_bounds(pose_F, desired_wrench=wrench_F, measured_wrench=measured_wrench_F)
+        return wrench_F
+
+    def _send_task_wrench(self, rtde_c, wrench_F: np.ndarray) -> None:
+        """Send a task-space wrench through UR force mode."""
+        rtde_c.forceMode(
+            self.origin.tolist(),
+            [1, 1, 1, 1, 1, 1],
+            np.asarray(wrench_F, dtype=np.float64).tolist(),
+            2,
+            self.config.speed_limits,
+        )
+        self.force_on = True
+
+    def _enter_task_force_mode(self, rtde_c) -> None:
+        """Start forceMode once for task-space control."""
+        rtde_c.forceModeSetGainScaling(self.config.force_mode_gain_scaling)
+        self._send_task_wrench(rtde_c, np.zeros(6, dtype=np.float64))
+
+    def _get_pending_commands(self) -> tuple[dict[str, np.ndarray] | None, int]:
+        """Drain the shared-memory queue and return all pending command payloads."""
+        try:
+            msgs = self.robot_cmd_queue.get_all()
+            return msgs, len(msgs["cmd"])
+        except Empty:
+            return None, 0
+
+    def _apply_pending_commands(
+        self,
+        msgs: dict[str, np.ndarray] | None,
+        n_cmd: int,
+        rtde_c,
+        rtde_r,
+        active_space: ControlSpace | None,
+        x_cmd: np.ndarray,
+        q_cmd: np.ndarray,
+    ) -> tuple[bool, ControlSpace | None, np.ndarray, np.ndarray]:
+        """Apply queued commands and update controller state and virtual targets."""
+        keep_running = True
+        if msgs is None:
+            return keep_running, active_space, x_cmd, q_cmd
+
+        for i in range(n_cmd):
+            single = {k: msgs[k][i] for k in msgs}
+            cmd_id = int(single["cmd"])
+            if cmd_id == Command.STOP.value:
+                keep_running = False
+                break
+
+            if cmd_id == Command.ZERO_FT.value:
+                rtde_c.zeroFtSensor()
+                continue
+
+            if cmd_id != Command.SET.value:
+                keep_running = False
+                break
+
+            new_space = self._ensure_control_space(single["space"])
+            if active_space is None:
+                active_space = new_space
+            elif new_space != active_space:
+                raise ValueError(
+                    "UR controller does not support switching between task-space and joint-space control"
+                )
+
+            self.origin = single["origin"].copy()
+            self.target = single["target"].copy()
+            self.kp = single["kp"].copy()
+            self.kd = single["kd"].copy()
+            self.max_pose = single["max_pose"].copy()
+            self.min_pose = single["min_pose"].copy()
+
+            pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
+            q_now = np.array(rtde_r.getActualQ(), dtype=np.float64)
+            new_control_mode = single["control_mode"]
+            new_delta_mode = single["delta_mode"]
+
+            if new_space == ControlSpace.JOINT and np.any(new_control_mode != ControlMode.POS):
+                raise ValueError("UR joint-space control only supports POS axes")
+
+            for axis in range(6):
+                became_relative_pos = (
+                    new_control_mode[axis] != self.control_mode[axis]
+                    and new_control_mode[axis] == ControlMode.POS
+                    and new_delta_mode[axis] == DeltaMode.RELATIVE
+                )
+                if not became_relative_pos:
+                    continue
+                if new_space == ControlSpace.TASK:
+                    x_cmd[axis] = pose_F[axis]
+                else:
+                    q_cmd[axis] = q_now[axis]
+
+            self.control_mode = new_control_mode.copy()
+            self.delta_mode = new_delta_mode.copy()
+            if new_space == ControlSpace.TASK and not self.force_on:
+                self._enter_task_force_mode(rtde_c)
+
+        return keep_running, active_space, x_cmd, q_cmd
 
     def zero_ft(self):
         """Re-zero the force-torque sensor in the control loop."""
@@ -364,24 +549,13 @@ class RTDETaskFrameController(mp.Process):
                 else:
                     assert rtde_c.setPayload(self.config.payload_mass)
 
-            # 4) Initialize ur force mode
-
-            # 4.1) Initialize target pose = current task pose (so we start from zero error)
+            # 4) Initialize controller targets from the current robot state
             pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
             x_cmd = pose_F.copy()  # [x, y, z, Rx, Ry, Rz] in task
+            q_cmd = np.array(rtde_r.getActualQ(), dtype=np.float64)
+            active_space: ControlSpace | None = None
 
-            # 4.2) Put the robot into 6D forceMode (zero‐wrench to begin)
-            rtde_c.forceModeSetGainScaling(self.config.force_mode_gain_scaling)
-            rtde_c.forceMode(
-                self.origin.tolist(),
-                [1, 1, 1, 1, 1, 1],
-                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                2,
-                self.config.speed_limits
-            )
-            self.force_on = True
-
-            # 4.3) Mark the loop as “ready” from the first successful iteration
+            # 4.2) Mark the loop as “ready” from the first successful iteration
             iter_idx = 0
             keep_running = True
 
@@ -424,52 +598,19 @@ class RTDETaskFrameController(mp.Process):
 
                 # ---------------- section: queue_get ----------------
                 t0 = time.monotonic()
-                try:
-                    msgs = self.robot_cmd_queue.get_all()
-                    n_cmd = len(msgs['cmd'])
-                except Empty:
-                    n_cmd = 0
+                msgs, n_cmd = self._get_pending_commands()
+                sec_wins["queue_get"].add(time.monotonic() - t0)
 
-                for i in range(n_cmd):
-                    single = {k: msgs[k][i] for k in msgs}
-                    cmd_id = int(single['cmd'])
-                    if cmd_id == Command.STOP.value:
-                        keep_running = False
-                        break
-
-                    elif cmd_id == Command.ZERO_FT.value:
-                        rtde_c.zeroFtSensor()
-                        continue
-
-                    # Only SET is supported besides STOP
-                    elif cmd_id == Command.SET.value:
-                        # Update any fields that arrived in the queue
-                        # (origin, mode, target, gains, bounds)
-                        self.origin = single["origin"].copy()
-                        self.target = single["target"].copy()
-                        self.kp = single["kp"].copy()
-                        self.kd = single["kd"].copy()
-                        self.max_pose = single["max_pose"].copy()
-                        self.min_pose = single["min_pose"].copy()
-
-                        # if switching to position control with relative/velocity mode, reset virtual target to current pose to avoid jumps
-                        pose_F = self.read_current_state(rtde_r)["ActualTCPPose"]
-
-                        # modes: 6×int8 each
-                        new_control_mode = single["control_mode"]
-                        new_delta_mode = single["delta_mode"]
-
-                        # reset virtual position when switching to delta position control
-                        for i in range(6):
-                            if new_control_mode[i] != self.control_mode[i] and new_control_mode[i] == ControlMode.POS and new_delta_mode[i] == DeltaMode.RELATIVE: 
-                                x_cmd[i] = pose_F[i]
-
-                        self.control_mode = new_control_mode.copy()
-                        self.delta_mode = new_delta_mode.copy()
-                    else:
-                        # Unknown command → treat as STOP
-                        keep_running = False
-                        break
+                t0 = time.monotonic()
+                keep_running, active_space, x_cmd, q_cmd = self._apply_pending_commands(
+                    msgs=msgs,
+                    n_cmd=n_cmd,
+                    rtde_c=rtde_c,
+                    rtde_r=rtde_r,
+                    active_space=active_space,
+                    x_cmd=x_cmd,
+                    q_cmd=q_cmd,
+                )
                 sec_wins["cmd_apply"].add(time.monotonic() - t0)
 
                 if not keep_running:
@@ -480,6 +621,7 @@ class RTDETaskFrameController(mp.Process):
                 current_state = self.read_current_state(rtde_r)
                 pose_F = current_state["ActualTCPPose"]
                 v_F = current_state["ActualTCPSpeed"]
+    
                 # filtered wrench
                 if ft_alpha is None:
                     measured_wrench_F = current_state["ActualTCPForce"]
@@ -495,6 +637,10 @@ class RTDETaskFrameController(mp.Process):
                 current_state["ActualTCPForceFiltered"] = np.array(measured_wrench_F)
                 current_state["SetTCPForce"] = np.array(wrench_F)
                 current_state['timestamp'] = time.time()
+
+                # read joint states
+                q_actual = np.asarray(current_state["ActualQ"], dtype=np.float64)
+                qd_actual = np.asarray(current_state["ActualQd"], dtype=np.float64)
                 sec_wins["recv_extra"].add(time.monotonic() - t0)
 
                 # ---------------- section: rb_put ----------------
@@ -504,134 +650,103 @@ class RTDETaskFrameController(mp.Process):
 
                 # ---------------- section: virt_update ----------------
                 t0 = time.monotonic()
+                if active_space == ControlSpace.TASK:
+                    # --- translation ---
+                    for i in range(3):
+                        control_mode_i = ControlMode(self.control_mode[i])
+                        delta_mode_i = DeltaMode(self.delta_mode[i])
 
-                # --- translation ---
-                for i in range(3):
-                    control_mode_i = ControlMode(self.control_mode[i])
-                    delta_mode_i = DeltaMode(self.delta_mode[i])
+                        if control_mode_i == ControlMode.POS and delta_mode_i == DeltaMode.ABSOLUTE:
+                            x_cmd[i] = self.target[i]
+                        elif control_mode_i == ControlMode.POS and delta_mode_i == DeltaMode.RELATIVE:
+                            # integrate velocity, or leak back when input velocity is in deadband
+                            v_cmd = float(self.target[i])
+                            if abs(v_cmd) > self.config.deadband_pos:
+                                x_cmd[i] += v_cmd * dt
+                            else:
+                                # leak virtual target back to actual pose
+                                x_cmd[i] += -self.config.leak_rate_pos * (x_cmd[i] - pose_F[i]) * dt
+                        elif control_mode_i == ControlMode.VEL or control_mode_i == ControlMode.WRENCH:
+                            pass
 
-                    if control_mode_i == ControlMode.POS and delta_mode_i == DeltaMode.ABSOLUTE:
-                        x_cmd[i] = self.target[i]
-                    elif control_mode_i == ControlMode.POS and delta_mode_i == DeltaMode.RELATIVE:
-                        # integrate velocity, or leak back when input velocity is in deadband
-                        v_cmd = float(self.target[i])
-                        if abs(v_cmd) > self.config.deadband_pos:
-                            x_cmd[i] += v_cmd * dt
+                    # --- rotation ---
+                    mask_abs_pos = np.array(
+                        [
+                            ControlMode(self.control_mode[i]) == ControlMode.POS
+                            and DeltaMode(self.delta_mode[i]) == DeltaMode.ABSOLUTE
+                            for i in range(3, 6)
+                        ],
+                        dtype=bool,
+                    )
+                    if np.any(mask_abs_pos):
+                        rpy_cmd = self._rotvec_to_rpy(x_cmd[3:6])
+                        target_rpy = np.asarray(self.target[3:6], dtype=float)
+                        rpy_cmd[mask_abs_pos] = target_rpy[mask_abs_pos]
+                        x_cmd[3:6] = self._rpy_to_rotvec(rpy_cmd)
+
+                    # SO(3) integration for angular velocity with deadband + leak
+                    mask_delta_pos = np.array(
+                        [
+                            ControlMode(self.control_mode[i]) == ControlMode.POS
+                            and DeltaMode(self.delta_mode[i]) == DeltaMode.RELATIVE
+                            for i in range(3, 6)
+                        ],
+                        dtype=bool,
+                    )
+                    if np.any(mask_delta_pos):
+                        omega = np.zeros(3, dtype=float)
+                        omega[mask_delta_pos] = np.array(self.target[3:6], dtype=float)[mask_delta_pos]
+                        omega_norm = np.linalg.norm(omega)
+                        R_cmd = R.from_rotvec(x_cmd[3:6])
+
+                        if omega_norm > self.config.deadband_rot:
+                            dR_move = R.from_rotvec(omega * dt)
+                            R_cmd = dR_move * R_cmd
                         else:
-                            # leak virtual target back to actual pose
-                            x_cmd[i] += -self.config.leak_rate_pos * (x_cmd[i] - pose_F[i]) * dt
-                    elif control_mode_i == ControlMode.VEL or control_mode_i == ControlMode.WRENCH:
-                        pass
+                            R_act = R.from_rotvec(pose_F[3:6])
+                            R_err = R_act * R_cmd.inv()
+                            rot_err_vec = R_err.as_rotvec()
+                            rot_err_vec[~mask_delta_pos] = 0.0
+                            alpha = np.clip(self.config.leak_rate_rot * dt, 0.0, 1.0)
+                            dR_leak = R.from_rotvec(alpha * rot_err_vec)
+                            R_cmd = dR_leak * R_cmd
 
-                # --- rotation ---
-                mask_abs_pos = np.array(
-                    [
-                        ControlMode(self.control_mode[i]) == ControlMode.POS
-                        and DeltaMode(self.delta_mode[i]) == DeltaMode.ABSOLUTE
-                        for i in range(3, 6)
-                    ],
-                    dtype=bool,
-                )
-                if np.any(mask_abs_pos):
-                    rpy_cmd = self._rotvec_to_rpy(x_cmd[3:6])
-                    target_rpy = np.asarray(self.target[3:6], dtype=float)
-                    rpy_cmd[mask_abs_pos] = target_rpy[mask_abs_pos]
-                    x_cmd[3:6] = self._rpy_to_rotvec(rpy_cmd)
+                        x_cmd[3:6] = R_cmd.as_rotvec()
 
-                # SO(3) integration for angular velocity with deadband + leak
-                mask_delta_pos = np.array(
-                    [
-                        ControlMode(self.control_mode[i]) == ControlMode.POS
-                        and DeltaMode(self.delta_mode[i]) == DeltaMode.RELATIVE
-                        for i in range(3, 6)
-                    ],
-                    dtype=bool,
-                )
-                if np.any(mask_delta_pos):
-                    # 1. Extract the commanded angular velocity for relative POS axes only
-                    omega = np.zeros(3, dtype=float)
-                    omega[mask_delta_pos] = np.array(self.target[3:6], dtype=float)[mask_delta_pos]
-
-                    # 2. Compute the spherical magnitude (L2 norm) of the commanded vector
-                    omega_norm = np.linalg.norm(omega)
-
-                    # Start from current virtual orientation
-                    R_cmd = R.from_rotvec(x_cmd[3:6])
-
-                    # 3. If the combined velocity exceeds the deadband, we are "driving" the orientation
-                    if omega_norm > self.config.deadband_rot:
-                        dR_move = R.from_rotvec(omega * dt)
-                        R_cmd = dR_move * R_cmd
-                    else:
-                        # 4. If below the deadband, let the orientation relax (leak) toward the actual pose
-                        R_act = R.from_rotvec(pose_F[3:6])
-                        R_err = R_act * R_cmd.inv()
-                        rot_err_vec = R_err.as_rotvec()
-                        
-                        # Prevent leaking on axes governed by absolute commands
-                        rot_err_vec[~mask_delta_pos] = 0.0
-                        
-                        # Leak factor in [0, 1]; take a small step along the error vector
-                        alpha = np.clip(self.config.leak_rate_rot * dt, 0.0, 1.0)
-                        dR_leak = R.from_rotvec(alpha * rot_err_vec)
-                        R_cmd = dR_leak * R_cmd
-
-                    # Write back virtual orientation as rotvec
-                    x_cmd[3:6] = R_cmd.as_rotvec()
-
-                # --- clamp virtual target pos ---
-                x_cmd = self.clip_pose(x_cmd)
+                    x_cmd = self.clip_pose(x_cmd)
+                elif active_space == ControlSpace.JOINT:
+                    for i in range(len(q_cmd)):
+                        if DeltaMode(self.delta_mode[i]) == DeltaMode.ABSOLUTE:
+                            q_cmd[i] = float(self.target[i])
+                        else:
+                            q_cmd[i] += float(self.target[i]) * dt
                 sec_wins["virt_update"].add(time.monotonic() - t0)
 
                 # ---------------- section: wrench ----------------
                 t0 = time.monotonic()
                 wrench_F = np.zeros(6, dtype=np.float64)
-
-                # compute errors
-                err_vec = np.zeros(6, dtype=np.float64)
-                err_vec[:3] = x_cmd[:3] - np.array(pose_F[:3])
-
-                R_cmd = R.from_rotvec(x_cmd[3:6])
-                R_act = R.from_rotvec(pose_F[3:6])
-                R_err = R_cmd * R_act.inv()
-                err_vec[3:6] = R_err.as_rotvec()
-
-                for i in range(6):
-                    control_mode_i = ControlMode(self.control_mode[i])
-
-                    if control_mode_i == ControlMode.WRENCH:
-                        wrench_F[i] = float(self.target[i])  # directly obey commanded force
-                        continue
-
-                    if control_mode_i == ControlMode.POS:
-                        e = float(err_vec[i])
-                        edot = float(-v_F[i])  # desired vel = 0
-                    elif control_mode_i == ControlMode.VEL:
-                        e = 0.0
-                        edot = float(self.target[i] - v_F[i])
-                    else:
-                        e = 0.0
-                        edot = 0.0
-
-                    if (self.config.compliance_safety_mode == "reference_limits" and
-                        self.config.compliance_safety_enable[i]):
-                        e, edot = self.clip_reference_errors(e, edot, i)
-
-                    wrench_F[i] = self.kp[i] * e + self.kd[i] * edot
-
-                self.apply_wrench_bounds(pose_F, desired_wrench=wrench_F, measured_wrench=measured_wrench_F)
+                torque_cmd = np.zeros(6, dtype=np.float64)
+                if active_space == ControlSpace.TASK:
+                    wrench_F = self._compute_task_wrench(
+                        x_cmd=x_cmd,
+                        pose_F=pose_F,
+                        v_F=v_F,
+                        measured_wrench_F=measured_wrench_F,
+                    )
+                elif active_space == ControlSpace.JOINT:
+                    torque_cmd = self._compute_joint_torque(
+                        q_cmd=q_cmd,
+                        q_actual=q_actual,
+                        qd_actual=qd_actual,
+                    )
                 sec_wins["wrench"].add(time.monotonic() - t0)
 
                 # ---------------- section: forcemode ----------------
                 t0 = time.monotonic()
-                rtde_c.forceMode(
-                    self.origin.tolist(),
-                    [1, 1, 1, 1, 1, 1],
-                    wrench_F.tolist(),
-                    2,
-                    self.config.speed_limits
-                )
-                self.force_on = True
+                if active_space == ControlSpace.TASK:
+                    self._send_task_wrench(rtde_c, wrench_F)
+                elif active_space == ControlSpace.JOINT:
+                    self._send_joint_torque(rtde_c, torque_cmd)
                 sec_wins["forcemode"].add(time.monotonic() - t0)
 
                 # compute time (everything before wait)

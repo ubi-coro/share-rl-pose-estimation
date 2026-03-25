@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+import importlib.util
+import sys
+import types
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+ROOT = Path(__file__).resolve().parents[3]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+
+def _load_task_frame_module():
+    module_path = ROOT / "src/share/envs/manipulation_primitive/task_frame.py"
+    module_name = "share_task_frame_test"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+task_frame_module = _load_task_frame_module()
+ControlMode = task_frame_module.ControlMode
+ControlSpace = task_frame_module.ControlSpace
+PolicyMode = task_frame_module.PolicyMode
+TaskFrame = task_frame_module.TaskFrame
+
+
+def _load_controller_module():
+    share_envs_pkg = types.ModuleType("share.envs")
+    share_envs_pkg.__path__ = []
+    mp_pkg = types.ModuleType("share.envs.manipulation_primitive")
+    mp_pkg.__path__ = []
+    shared_memory_module = types.ModuleType("share.utils.shared_memory")
+
+    class _UnusedRingBuffer:
+        pass
+
+    class _UnusedQueue:
+        pass
+
+    shared_memory_module.SharedMemoryRingBuffer = _UnusedRingBuffer
+    shared_memory_module.SharedMemoryQueue = _UnusedQueue
+    shared_memory_module.Empty = type("Empty", (Exception,), {})
+    sys.modules["share.envs"] = share_envs_pkg
+    sys.modules["share.envs.manipulation_primitive"] = mp_pkg
+    sys.modules["share.envs.manipulation_primitive.task_frame"] = task_frame_module
+    sys.modules["share.utils.shared_memory"] = shared_memory_module
+
+    module_path = ROOT / "src/share/robots/ur/lerobot_robot_ur/controller.py"
+    module_name = "share_ur_controller_test"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_ur_module(controller_module):
+    cameras_module = types.ModuleType("lerobot.cameras")
+    cameras_module.make_cameras_from_configs = lambda configs: {}
+
+    hil_processor_module = types.ModuleType("lerobot.processor.hil_processor")
+    hil_processor_module.GRIPPER_KEY = "gripper"
+
+    robots_module = types.ModuleType("lerobot.robots")
+    robots_module.Robot = object
+
+    errors_module = types.ModuleType("lerobot.utils.errors")
+
+    class DeviceNotConnectedError(RuntimeError):
+        pass
+
+    class DeviceAlreadyConnectedError(RuntimeError):
+        pass
+
+    errors_module.DeviceNotConnectedError = DeviceNotConnectedError
+    errors_module.DeviceAlreadyConnectedError = DeviceAlreadyConnectedError
+
+    config_module = types.ModuleType("share.robots.ur.lerobot_robot_ur.config_ur")
+    config_module.URConfig = object
+
+    gripper_module = types.ModuleType("share.grippers.robotiq_controller")
+    gripper_module.RTDERobotiqController = object
+
+    ur_parent = types.ModuleType("share.robots.ur")
+    ur_parent.__path__ = []
+    ur_pkg = types.ModuleType("share.robots.ur.lerobot_robot_ur")
+    ur_pkg.__path__ = []
+
+    sys.modules.setdefault("lerobot.cameras", cameras_module)
+    sys.modules.setdefault("lerobot.processor.hil_processor", hil_processor_module)
+    sys.modules.setdefault("lerobot.robots", robots_module)
+    sys.modules.setdefault("lerobot.utils.errors", errors_module)
+    sys.modules["share.robots.ur"] = ur_parent
+    sys.modules["share.robots.ur.lerobot_robot_ur"] = ur_pkg
+    sys.modules["share.robots.ur.lerobot_robot_ur.config_ur"] = config_module
+    sys.modules["share.robots.ur.lerobot_robot_ur.controller"] = controller_module
+    sys.modules["share.grippers.robotiq_controller"] = gripper_module
+
+    module_path = ROOT / "src/share/robots/ur/lerobot_robot_ur/ur.py"
+    module_name = "share_ur_robot_test"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec is not None and spec.loader is not None
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class _Queue:
+    def __init__(self):
+        self.items = []
+
+    def put(self, item):
+        self.items.append(item)
+
+
+class _ReadyController:
+    def __init__(self):
+        self.is_ready = True
+        self.commands = []
+
+    def send_cmd(self, cmd):
+        self.commands.append(cmd)
+
+
+def test_task_frame_command_joint_space_maps_joint_position_keys():
+    controller_module = _load_controller_module()
+    command = controller_module.TaskFrameCommand(
+        space=ControlSpace.JOINT,
+        target=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        control_mode=[ControlMode.POS] * 6,
+        policy_mode=[PolicyMode.ABSOLUTE] * 6,
+    )
+
+    assert command.to_robot_action() == {
+        "joint_1.pos": 0.1,
+        "joint_2.pos": 0.2,
+        "joint_3.pos": 0.3,
+        "joint_4.pos": 0.4,
+        "joint_5.pos": 0.5,
+        "joint_6.pos": 0.6,
+    }
+
+
+def test_controller_rejects_task_to_joint_switches():
+    controller_module = _load_controller_module()
+    controller = object.__new__(controller_module.RTDETaskFrameController)
+    controller._active_space = None
+    controller._last_cmd = controller_module.TaskFrameCommand()
+    controller.robot_cmd_queue = _Queue()
+
+    controller.send_cmd(
+        controller_module.TaskFrameCommand(
+            space=ControlSpace.TASK,
+            control_mode=[ControlMode.POS] * 6,
+            policy_mode=[PolicyMode.ABSOLUTE] * 6,
+        )
+    )
+
+    with pytest.raises(ValueError, match="switching between task-space and joint-space"):
+        controller.send_cmd(
+            controller_module.TaskFrameCommand(
+                space=ControlSpace.JOINT,
+                control_mode=[ControlMode.POS] * 6,
+                policy_mode=[PolicyMode.ABSOLUTE] * 6,
+            )
+        )
+
+
+def test_controller_joint_impedance_uses_direct_torque_interface():
+    controller_module = _load_controller_module()
+    controller = object.__new__(controller_module.RTDETaskFrameController)
+    controller.kp = np.array([10.0] * 6)
+    controller.kd = np.array([2.0] * 6)
+
+    torque = controller._compute_joint_torque(
+        q_cmd=np.array([1.0, -0.5, 0.2, 0.0, 0.0, 0.3]),
+        q_actual=np.array([0.8, -0.4, 0.0, 0.1, 0.0, 0.0]),
+        qd_actual=np.array([0.2, -0.1, 0.0, 0.3, 0.0, -0.2]),
+    )
+    np.testing.assert_allclose(torque, [1.6, -0.8, 2.0, -1.6, 0.0, 3.4])
+
+    class DirectTorqueOnly:
+        def __init__(self):
+            self.calls = []
+
+        def directTorque(self, torque_cmd, friction_comp):
+            self.calls.append((torque_cmd, friction_comp))
+
+    rtde_c = DirectTorqueOnly()
+    controller_module.RTDETaskFrameController._send_joint_torque(rtde_c, torque)
+    assert rtde_c.calls == [(torque.tolist(), True)]
+
+
+def test_ur_wrapper_locks_joint_space_and_rejects_task_space_afterwards():
+    controller_module = _load_controller_module()
+    ur_module = _load_ur_module(controller_module)
+    robot = object.__new__(ur_module.URV2)
+    robot.controller = _ReadyController()
+    robot.gripper = None
+    robot.cameras = {}
+    robot.config = types.SimpleNamespace()
+    robot.task_frame = controller_module.TaskFrameCommand(
+        space=ControlSpace.JOINT,
+        target=[0.0] * 6,
+        control_mode=[ControlMode.POS] * 6,
+        policy_mode=[PolicyMode.RELATIVE] * 6,
+    )
+    robot._active_control_space = None
+
+    robot.set_task_frame(robot.task_frame)
+    robot.send_action({"joint_1.pos": 0.1, "joint_2.pos": -0.2})
+
+    sent = robot.controller.commands[-1]
+    assert sent.space == ControlSpace.JOINT
+    assert sent.target[:2] == [0.1, -0.2]
+
+    with pytest.raises(ValueError, match="switching between task-space and joint-space"):
+        robot.send_action({"x.ee_pos": 0.05})
+
+    with pytest.raises(ValueError, match="switching between task-space and joint-space"):
+        robot.set_task_frame(
+            TaskFrame(
+                space=ControlSpace.TASK,
+                target=[0.0] * 6,
+                control_mode=[ControlMode.POS] * 6,
+                policy_mode=[PolicyMode.ABSOLUTE] * 6,
+            )
+        )

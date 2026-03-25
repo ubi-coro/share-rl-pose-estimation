@@ -26,7 +26,7 @@ from lerobot.cameras import make_cameras_from_configs
 from lerobot.processor.hil_processor import GRIPPER_KEY
 from lerobot.robots import Robot
 from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
-from share.envs.manipulation_primitive.task_frame import TaskFrame, ControlMode, TASK_FRAME_AXIS_NAMES
+from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, TASK_FRAME_AXIS_NAMES, TaskFrame
 from share.robots.ur.lerobot_robot_ur.config_ur import URConfig
 from share.robots.ur.lerobot_robot_ur.controller import TaskFrameCommand, RTDETaskFrameController
 
@@ -35,7 +35,7 @@ from share.grippers.robotiq_controller import RTDERobotiqController
 logger = logging.getLogger(__name__)
 
 
-class URV2(Robot):
+class UR(Robot):
 
     config_class = URConfig
     name = "ur"
@@ -79,6 +79,7 @@ class URV2(Robot):
         # runtime vars
         self.logs = {}
         self.last_robot_action = TaskFrameCommand()
+        self._active_control_space: ControlSpace | None = None
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -228,16 +229,36 @@ class URV2(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        for i, ax in enumerate(TASK_FRAME_AXIS_NAMES):
-            if f"{ax}.ee_pos" in action:
-                self.task_frame.target[i] = action[f"{ax}.ee_pos"]
-                self.task_frame.control_mode[i] = ControlMode.POS
-            elif f"{ax}.ee_vel" in action:
-                self.task_frame.target[i] = action[f"{ax}.ee_vel"]
-                self.task_frame.control_mode[i] = ControlMode.VEL
-            elif f"{ax}.ee_wrench" in action:
-                self.task_frame.target[i] = action[f"{ax}.ee_wrench"]
-                self.task_frame.control_mode[i] = ControlMode.WRENCH
+        action_space = self._space_from_action(action)
+        if action_space is not None:
+            self._ensure_control_space(action_space)
+            if self.task_frame.space != action_space:
+                self.task_frame.space = action_space
+                self.task_frame.origin = None if action_space == ControlSpace.JOINT else [0.0] * 6
+                if action_space == ControlSpace.JOINT:
+                    self.task_frame.control_mode = [ControlMode.POS] * len(self.task_frame.target)
+
+        if self.task_frame.space == ControlSpace.JOINT:
+            for i in range(len(self.joint_names)):
+                canonical_key = f"joint_{i + 1}.pos"
+                named_key = f"{self.joint_names[i]}.pos"
+                if canonical_key in action:
+                    self.task_frame.target[i] = action[canonical_key]
+                    self.task_frame.control_mode[i] = ControlMode.POS
+                elif named_key in action:
+                    self.task_frame.target[i] = action[named_key]
+                    self.task_frame.control_mode[i] = ControlMode.POS
+        else:
+            for i, ax in enumerate(TASK_FRAME_AXIS_NAMES):
+                if f"{ax}.ee_pos" in action:
+                    self.task_frame.target[i] = action[f"{ax}.ee_pos"]
+                    self.task_frame.control_mode[i] = ControlMode.POS
+                elif f"{ax}.ee_vel" in action:
+                    self.task_frame.target[i] = action[f"{ax}.ee_vel"]
+                    self.task_frame.control_mode[i] = ControlMode.VEL
+                elif f"{ax}.ee_wrench" in action:
+                    self.task_frame.target[i] = action[f"{ax}.ee_wrench"]
+                    self.task_frame.control_mode[i] = ControlMode.WRENCH
 
         if self.gripper is not None and f"{GRIPPER_KEY}.pos" in action:
             self.send_gripper_action(action[f"{GRIPPER_KEY}.pos"])
@@ -251,9 +272,42 @@ class URV2(Robot):
 
     def set_task_frame(self, new_task_frame: TaskFrameCommand | TaskFrame):
         if isinstance(new_task_frame, TaskFrame) and not isinstance(new_task_frame, TaskFrameCommand):
-            self.task_frame = TaskFrameCommand(**asdict(new_task_frame))
-        else:
-            self.task_frame = new_task_frame
+            new_task_frame = TaskFrameCommand(**asdict(new_task_frame))
+
+        self._ensure_control_space(new_task_frame.space)
+        self.task_frame = new_task_frame
+
+    def _ensure_control_space(self, space: ControlSpace | int) -> ControlSpace:
+        """Lock the robot wrapper to its first commanded control space."""
+        resolved = ControlSpace(int(space))
+        if self._active_control_space is None:
+            self._active_control_space = resolved
+            return resolved
+        if resolved != self._active_control_space:
+            raise ValueError(
+                "UR robot does not support switching between task-space and joint-space control"
+            )
+        return resolved
+
+    @staticmethod
+    def _space_from_action(action: dict[str, Any]) -> ControlSpace | None:
+        """Infer whether an action dict targets joint or task space."""
+        has_task_keys = any(
+            key.endswith(".ee_pos") or key.endswith(".ee_vel") or key.endswith(".ee_wrench")
+            for key in action
+        )
+        has_joint_keys = any(
+            key.endswith(".pos") and ".ee_" not in key and key != f"{GRIPPER_KEY}.pos"
+            for key in action
+        )
+
+        if has_task_keys and has_joint_keys:
+            raise ValueError("UR robot actions cannot mix task-space and joint-space keys")
+        if has_task_keys:
+            return ControlSpace.TASK
+        if has_joint_keys:
+            return ControlSpace.JOINT
+        return None
 
     def disconnect(self):
         if not self.is_connected:
