@@ -8,17 +8,14 @@ from typing import Any
 import numpy as np
 import torch
 from lerobot.configs import parser
-from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.image_writer import safe_stop_image_writer
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.processor import (
     PolicyAction,
     PolicyProcessorPipeline,
     TransitionKey
 )
-from lerobot.processor.rename_processor import rename_stats
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import ACTION, REWARD, DONE
 from lerobot.utils.control_utils import predict_action
@@ -32,7 +29,7 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 from share.configs.record import RecordConfig
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
-from share.envs.utils import env_to_dataset_features
+from share.utils.control_utils import make_policies_and_datasets
 from share.utils.video_utils import MultiVideoEncodingManager
 
 init_logging()
@@ -65,77 +62,6 @@ init_logging()
                                V
                   ( Rerun Log / Loop Wait )
 """
-
-
-def make_policies_and_datasets(cfg: RecordConfig):
-    datasets = {}
-    policies = {}
-    preprocessors = {}
-    postprocessors = {}
-    for name, p in cfg.env.primitives.items():
-        if p.is_adaptive:
-
-            if name == cfg.env.reset_primitive:
-                continue
-
-            # 1) dataset
-            root = Path(cfg.dataset.root) / name
-            repo_id = f"{cfg.dataset.repo_id}-{name}"
-
-            if cfg.resume:
-                datasets[name] = LeRobotDataset(
-                    repo_id,
-                    root=root,
-                    batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-                    vcodec=cfg.dataset.vcodec,
-                )
-                datasets[name].start_image_writer(
-                    num_processes=cfg.dataset.num_image_writer_processes,
-                    num_threads=cfg.dataset.num_image_writer_threads_per_camera * p.num_cameras
-                )
-
-            else:
-                datasets[name] = LeRobotDataset.create(
-                    repo_id,
-                    cfg.env.fps,
-                    root=root,
-                    features=env_to_dataset_features(p.features),
-                    robot_type=cfg.env.type,
-                    use_videos=cfg.dataset.video,
-                    image_writer_processes=cfg.dataset.num_image_writer_processes,
-                    image_writer_threads=cfg.dataset.num_image_writer_threads_per_camera * p.num_cameras,
-                    batch_encoding_size=cfg.dataset.video_encoding_batch_size,
-                    vcodec=cfg.dataset.vcodec,
-                )
-
-            # 2) policy
-            if p.policy is None:
-                policies[name] = None
-                preprocessors[name] = None
-                postprocessors[name] = None
-                continue
-
-            if p.policy.pretrained_path is not None:
-                cli_overrides = parser.get_cli_overrides("policy")
-                p.policy = PreTrainedConfig.from_pretrained(p.policy.pretrained_path)  # , cli_overrides=cli_overrides)
-
-            policies[name] = make_policy(cfg=p.policy, ds_meta=datasets[name].meta)
-            policies[name] = policies[name].eval()
-
-            pre, post = make_pre_post_processors(
-                policy_cfg=p.policy,
-                pretrained_path=p.policy.pretrained_path,
-                dataset_stats=rename_stats(datasets[name].meta.stats, cfg.dataset.rename_map),
-                preprocessor_overrides={
-                    "device_processor": {"device": p.policy.device},
-                    "rename_observations_processor": {"rename_map": cfg.dataset.rename_map},
-                },
-            )
-            preprocessors[name] = pre
-            postprocessors[name] = post
-
-    return datasets, policies, preprocessors, postprocessors
-
 
 @safe_stop_image_writer
 def record_loop(
@@ -227,8 +153,6 @@ def record_loop(
         transition = new_transition
 
         # 6) Handle done
-        # Termination refers to whether we are in a terminal primitive
-        # Only from here are we able to cleanly reset to starting conditions
         if (
             done or
             truncated or
@@ -296,7 +220,6 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     log_say("Stop recording", cfg.play_sounds, blocking=True)
     mp_net.close()
-
 
 
 if __name__ == "__main__":
