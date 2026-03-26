@@ -1,11 +1,14 @@
+import math
 from dataclasses import dataclass
 from typing import Any, Literal
-
-import numpy as np
 
 from draccus import ChoiceRegistry
 
 from lerobot.teleoperators import TeleopEvents
+
+from share.envs.manipulation_primitive.config_manipulation_primitive import PRIMITIVE_TARGET_POSE_INFO_KEY
+from share.envs.utils import to_scalar, resolve_value, compare, axis_to_index
+from share.utils.transformation_utils import get_robot_pose_from_observation
 
 
 @dataclass
@@ -30,46 +33,6 @@ class Transition(ChoiceRegistry):
     def check(self, obs: dict, info: dict) -> bool:
         result = self.evaluate(obs=obs, info=info)
         return result.terminated or result.truncated
-
-
-def _resolve_value(source: dict[str, Any], key: str) -> Any:
-    current: Any = source
-    if key in source:
-        return current[key]
-
-    for piece in key.split("."):
-        if piece not in current:
-            raise KeyError(f"Key '{key}' not found in transition source.")
-        current = current[piece]
-
-    return current
-
-
-def _to_scalar(value: Any) -> float:
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    arr = np.asarray(value)
-    if arr.size != 1:
-        raise ValueError(f"Expected scalar-like value for transition comparison, received shape {arr.shape}.")
-    return float(arr.reshape(-1)[0])
-
-
-def _compare(lhs: float, rhs: float, operator: str) -> bool:
-    if operator == "ge":
-        return lhs >= rhs
-    if operator == "gt":
-        return lhs > rhs
-    if operator == "le":
-        return lhs <= rhs
-    if operator == "lt":
-        return lhs < rhs
-    if operator == "eq":
-        return lhs == rhs
-    if operator == "ne":
-        return lhs != rhs
-    raise ValueError(f"Unsupported comparison operator '{operator}'.")
-
 
 @Transition.register_subclass("always")
 @dataclass
@@ -103,8 +66,8 @@ class OnObservationThreshold(Transition):
     operator: Literal["ge", "gt", "le", "lt", "eq", "ne"] = "ge"
 
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
-        value = _to_scalar(_resolve_value(obs, self.obs_key))
-        fired = _compare(value, self.threshold, self.operator)
+        value = to_scalar(resolve_value(obs, self.obs_key))
+        fired = compare(value, self.threshold, self.operator)
         return TransitionOutcome(
             terminated=fired,
             reward=self.additional_reward,
@@ -119,7 +82,7 @@ class OnTimeLimit(Transition):
     step_key: str = "step"
 
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
-        current_steps = int(_to_scalar(_resolve_value(info, self.step_key)))
+        current_steps = int(to_scalar(resolve_value(info, self.step_key)))
         fired = current_steps >= self.max_steps
         return TransitionOutcome(
             terminated=False,
@@ -142,15 +105,75 @@ class RewardClassifierTransition(Transition):
         # todo: run the classifier here
 
         if self.metric_key in info:
-            metric = _resolve_value(info, self.metric_key)
+            metric = resolve_value(info, self.metric_key)
         else:
-            metric = _resolve_value(obs, self.metric_key)
+            metric = resolve_value(obs, self.metric_key)
 
-        value = _to_scalar(metric)
-        fired = _compare(value, self.threshold, self.operator)
+        value = to_scalar(metric)
+        fired = compare(value, self.threshold, self.operator)
         return TransitionOutcome(
             terminated=fired,
             truncated=False,
-            reward=self.additional_reward,
-            reason="reward_classifier" if self.reason is None else self.reason,
+            reward=self.additional_reward if fired else 0.0,
+            reason="reward_classifier" if fired and self.reason is None else self.reason if fired else None,
         )
+
+
+@Transition.register_subclass("on_target_pose_reached")
+@dataclass
+class OnTargetPoseReached(Transition):
+    robot_name: str | None = None
+    axes: list[int | str] | None = None
+    tolerance: float | list[float] = 0.01
+    target_key: str = PRIMITIVE_TARGET_POSE_INFO_KEY
+
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
+        """Check whether the current EE pose has reached the target pose.
+
+        Args:
+            obs: Processed observation dictionary. The current EE pose is read
+                from here using the shared observation-pose utility.
+            info: Processed info dictionary. The target pose is read from
+                ``target_key``.
+
+        Returns:
+            ``TransitionOutcome`` indicating whether the pose condition fired.
+        """
+        targets = resolve_value(info, self.target_key)
+        robot_names = [self.robot_name] if self.robot_name is not None else sorted(targets)
+        fired = bool(robot_names)
+        for robot_name in robot_names:
+            current_pose = get_robot_pose_from_observation(obs, robot_name)
+            target_pose = [float(v) for v in targets[robot_name]]
+            axes = self._resolved_axes()
+            tolerances = self._resolved_tolerances()
+            for axis in axes:
+                error = current_pose[axis] - target_pose[axis]
+                if axis >= 3:
+                    error = math.atan2(math.sin(error), math.cos(error))
+                if abs(error) > tolerances[axis]:
+                    fired = False
+                    break
+            if not fired:
+                break
+
+        return TransitionOutcome(
+            terminated=fired,
+            reward=self.additional_reward if fired else 0.0,
+            reason="target_pose_reached" if fired and self.reason is None else self.reason if fired else None,
+        )
+
+    def _resolved_axes(self) -> list[int]:
+        if self.axes is not None:
+            return [axis_to_index(axis) for axis in self.axes]
+        return [0, 1, 2, 3, 4, 5]
+
+    def _resolved_tolerances(self) -> list[float]:
+        if isinstance(self.tolerance, (int, float)):
+            return [float(self.tolerance)] * 6
+        if len(self.tolerance) != 6:
+            raise ValueError("OnTargetPoseReached.tolerance must be a scalar or length-6 list.")
+        return [float(v) for v in self.tolerance]
+
+
+

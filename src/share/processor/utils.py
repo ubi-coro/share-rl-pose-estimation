@@ -1,11 +1,10 @@
 import logging
 import threading
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import evdev
 import torch
 from lerobot.processor.hil_processor import GRIPPER_KEY
-from scipy.spatial.transform import Rotation
 
 from share.teleoperators.utils import TeleopEvents
 
@@ -47,46 +46,11 @@ def flatten_nested_policy_action(
     return torch.cat(values)
 
 
-def rotation_from_extrinsic_xyz(rx: float, ry: float, rz: float) -> Rotation:
-    """Build a rotation from extrinsic XYZ angles using explicit axis composition."""
-
-    # Extrinsic XYZ composition applies X then Y then Z in the world frame.
-    # Rotation multiplication order in scipy is right-to-left application.
-    rot_x = Rotation.from_rotvec([rx, 0.0, 0.0])
-    rot_y = Rotation.from_rotvec([0.0, ry, 0.0])
-    rot_z = Rotation.from_rotvec([0.0, 0.0, rz])
-    return rot_z * rot_y * rot_x
-
-
-def euler_xyz_from_rotation(rotation: Rotation) -> list[float]:
-    """Convert a ``Rotation`` back to XYZ Euler angles in radians."""
-
-    return rotation.as_euler("xyz", degrees=False).tolist()
-
-
 def policy_action_keys_for_robot(frame: "TaskFrame", gripper_enable: bool) -> list[str]:
     keys = list(frame.policy_action_keys())
     if gripper_enable:
         keys.append(f"{GRIPPER_KEY}.pos")
     return keys
-
-
-def rotation_component_keys(frame: "TaskFrame", absolute_rot_axes: list[int]) -> list[str]:
-    if len(absolute_rot_axes) == 1:
-        axis_name = frame.action_key_for_axis(absolute_rot_axes[0]).removesuffix(".pos")
-        return [f"{axis_name}.pos.cos", f"{axis_name}.pos.sin"]
-    if len(absolute_rot_axes) == 2:
-        return ["rotation.s2.x", "rotation.s2.y", "rotation.s2.z"]
-    if len(absolute_rot_axes) == 3:
-        return [
-            "rotation.so3.a1.x",
-            "rotation.so3.a1.y",
-            "rotation.so3.a1.z",
-            "rotation.so3.a2.x",
-            "rotation.so3.a2.y",
-            "rotation.so3.a2.z",
-        ]
-    return []
 
 
 class FootSwitchHandler:

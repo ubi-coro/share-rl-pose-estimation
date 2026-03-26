@@ -86,3 +86,30 @@ If `is_task_frame_robot == False`:
   2. **Pose Limits:** Clamp the absolute Cartesian setpoint against `TaskFrame.min_target` and `TaskFrame.max_target`.
   3. **Inverse Kinematics (IK):** Solve IK (`kinematics_solver`) to convert the bounded Cartesian 6-vector into absolute joint configurations ($q$).
   4. Replace the Task Frame dictionary keys with Joint names.
+
+---
+
+## 7. Primitive Entry Lifecycle
+
+MP-Nets treat primitive changes as a two-phase lifecycle:
+
+1. `step()` runs the current primitive, evaluates transitions, and returns a terminating transition when a primitive switch is requested.
+2. The caller then invokes `mp_net.reset()`, which enters the next primitive using the last transition context.
+
+That entry context carries the last processed observation together with the previous primitive's task-frame origin. Primitive configs can use it inside `on_entry` to resolve dynamic targets before the next primitive starts stepping.
+
+The runtime publishes these stable info keys on every step/reset:
+
+- `primitive_target_pose`
+- `primitive_complete`
+- `trajectory_progress`
+
+## 8. Config-Defined Primitive Types
+
+The primitive config is a registry with three intended primitive families:
+
+- `static`: legacy behavior; task-frame targets come directly from config.
+- `move_delta`: resolves a target once on entry from `start_pose + delta`, with `delta_frame` in `world` or `ee_current`.
+- `open_loop_trajectory`: resolves the same entry target, then uses its own env subclass to execute a chunked scripted trajectory internally over multiple robot substeps per outer `step()`.
+
+Configs stay declarative: runtime target state lives in the primitive env. `move_delta` updates the env target on entry so downstream action projection and transition checks observe the same target. `open_loop_trajectory` is scripted-only in v1 and exposes completion/progress through the info keys above.
