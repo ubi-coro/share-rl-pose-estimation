@@ -12,7 +12,7 @@ from share.utils.transformation_utils import get_robot_pose_from_observation
 
 
 @dataclass
-class TransitionOutcome:
+class Outcome:
     reward: float = 0.0
     terminated: bool = False
     truncated: bool = False
@@ -27,18 +27,19 @@ class Transition(ChoiceRegistry):
     additional_reward: float = 0.0
     reason: str | None = None
 
-    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> Outcome:
         raise NotImplementedError
 
     def check(self, obs: dict, info: dict) -> bool:
         result = self.evaluate(obs=obs, info=info)
         return result.terminated or result.truncated
 
+
 @Transition.register_subclass("always")
 @dataclass
 class Always(Transition):
-    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
-        return TransitionOutcome(
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> Outcome:
+        return Outcome(
             terminated=True,
             reward=self.additional_reward,
             reason="always" if self.reason is None else self.reason
@@ -50,8 +51,8 @@ class Always(Transition):
 class OnSuccess(Transition):
     success_key: str = TeleopEvents.SUCCESS
 
-    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
-        return TransitionOutcome(
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> Outcome:
+        return Outcome(
             terminated=info.get(self.success_key, False),
             reward=self.additional_reward,
             reason="success" if self.reason is None else self.reason
@@ -65,10 +66,10 @@ class OnObservationThreshold(Transition):
     threshold: float = 0.0
     operator: Literal["ge", "gt", "le", "lt", "eq", "ne"] = "ge"
 
-    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> Outcome:
         value = to_scalar(resolve_value(obs, self.obs_key))
         fired = compare(value, self.threshold, self.operator)
-        return TransitionOutcome(
+        return Outcome(
             terminated=fired,
             reward=self.additional_reward,
             reason="observation_threshold" if self.reason is None else self.reason
@@ -81,10 +82,10 @@ class OnTimeLimit(Transition):
     max_steps: int = 0
     step_key: str = "step"
 
-    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> Outcome:
         current_steps = int(to_scalar(resolve_value(info, self.step_key)))
         fired = current_steps >= self.max_steps
-        return TransitionOutcome(
+        return Outcome(
             terminated=False,
             truncated=fired,
             reward=self.additional_reward,
@@ -100,7 +101,7 @@ class RewardClassifierTransition(Transition):
     operator: Literal["ge", "gt", "le", "lt", "eq", "ne"] = "ge"
     additional_reward: float = 1.0
 
-    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> Outcome:
 
         # todo: run the classifier here
 
@@ -111,7 +112,7 @@ class RewardClassifierTransition(Transition):
 
         value = to_scalar(metric)
         fired = compare(value, self.threshold, self.operator)
-        return TransitionOutcome(
+        return Outcome(
             terminated=fired,
             truncated=False,
             reward=self.additional_reward if fired else 0.0,
@@ -127,7 +128,7 @@ class OnTargetPoseReached(Transition):
     tolerance: float | list[float] = 0.01
     target_key: str = PRIMITIVE_TARGET_POSE_INFO_KEY
 
-    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> TransitionOutcome:
+    def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> Outcome:
         """Check whether the current EE pose has reached the target pose.
 
         Args:
@@ -137,7 +138,7 @@ class OnTargetPoseReached(Transition):
                 ``target_key``.
 
         Returns:
-            ``TransitionOutcome`` indicating whether the pose condition fired.
+            ``Outcome`` indicating whether the pose condition fired.
         """
         targets = resolve_value(info, self.target_key)
         robot_names = [self.robot_name] if self.robot_name is not None else sorted(targets)
@@ -157,7 +158,7 @@ class OnTargetPoseReached(Transition):
             if not fired:
                 break
 
-        return TransitionOutcome(
+        return Outcome(
             terminated=fired,
             reward=self.additional_reward if fired else 0.0,
             reason="target_pose_reached" if fired and self.reason is None else self.reason if fired else None,
