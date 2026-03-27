@@ -10,6 +10,7 @@ from lerobot.processor.hil_processor import HasTeleopEvents
 from lerobot.teleoperators import Teleoperator
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
+from share.teleoperators.spacemouse.lerobot_teleoperator_spacemouse import pyspacemouse
 
 
 logger = logging.getLogger(__name__)

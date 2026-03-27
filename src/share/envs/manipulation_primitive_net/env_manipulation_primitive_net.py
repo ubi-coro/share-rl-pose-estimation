@@ -17,7 +17,7 @@ from lerobot.utils.transition import Transition
 from share.envs.manipulation_primitive.config_manipulation_primitive import PrimitiveEntryContext
 from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
 from share.envs.utils import task_frame_origins
-from share.teleoperators.utils import TeleopEvents
+from share.teleoperators import TeleopEvents
 
 
 class ManipulationPrimitiveNet(gym.Env):

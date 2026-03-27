@@ -6,7 +6,7 @@ from lerobot.processor import InfoProcessorStep, ProcessorStepRegistry, Transiti
 from lerobot.processor.hil_processor import TELEOP_ACTION_KEY, _check_teleop_with_events
 
 from share.processor.utils import FootSwitchHandler
-from share.teleoperators.utils import TeleopEvents
+from share.teleoperators import TeleopEvents
 
 for _registry_name in (
     "add_teleop_action_on_intervention_as_complementary_data",

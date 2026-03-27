@@ -661,11 +661,12 @@ class RTDETaskFrameController(mp.Process):
                         elif control_mode_i == ControlMode.POS and delta_mode_i == DeltaMode.RELATIVE:
                             # integrate velocity, or leak back when input velocity is in deadband
                             v_cmd = float(self.target[i])
-                            if abs(v_cmd) > self.config.deadband_pos:
-                                x_cmd[i] += v_cmd * dt
-                            else:
+                            if self.config.deadband_leak_enable and abs(v_cmd) < self.config.deadband_leak_band_pos:
                                 # leak virtual target back to actual pose
-                                x_cmd[i] += -self.config.leak_rate_pos * (x_cmd[i] - pose_F[i]) * dt
+                                x_cmd[i] += -self.config.deadband_leak_rate_pos * (x_cmd[i] - pose_F[i]) * dt
+                            else:
+                                x_cmd[i] += v_cmd * dt
+
                         elif control_mode_i == ControlMode.VEL or control_mode_i == ControlMode.WRENCH:
                             pass
 
@@ -699,17 +700,17 @@ class RTDETaskFrameController(mp.Process):
                         omega_norm = np.linalg.norm(omega)
                         R_cmd = R.from_rotvec(x_cmd[3:6])
 
-                        if omega_norm > self.config.deadband_rot:
-                            dR_move = R.from_rotvec(omega * dt)
-                            R_cmd = dR_move * R_cmd
-                        else:
+                        if self.config.deadband_leak_enable and omega_norm < self.config.deadband_leak_band_rot:
                             R_act = R.from_rotvec(pose_F[3:6])
                             R_err = R_act * R_cmd.inv()
                             rot_err_vec = R_err.as_rotvec()
                             rot_err_vec[~mask_delta_pos] = 0.0
-                            alpha = np.clip(self.config.leak_rate_rot * dt, 0.0, 1.0)
+                            alpha = np.clip(self.config.deadband_leak_rate_rot * dt, 0.0, 1.0)
                             dR_leak = R.from_rotvec(alpha * rot_err_vec)
                             R_cmd = dR_leak * R_cmd
+                        else:
+                            dR_move = R.from_rotvec(omega * dt)
+                            R_cmd = dR_move * R_cmd
 
                         x_cmd[3:6] = R_cmd.as_rotvec()
 

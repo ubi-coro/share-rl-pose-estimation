@@ -9,7 +9,6 @@ from lerobot.configs.types import PipelineFeatureType, PolicyFeature
 from lerobot.processor.core import EnvTransition, TransitionKey
 from lerobot.processor.hil_processor import TELEOP_ACTION_KEY, GRIPPER_KEY
 from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry
-from lerobot.teleoperators import TeleopEvents
 
 from share.envs.manipulation_primitive.task_frame import (
     ControlMode,
@@ -21,6 +20,8 @@ from share.envs.manipulation_primitive.task_frame import (
 from share.envs.utils import check_delta_teleoperator
 from share.processor.utils import policy_action_keys_for_robot, flatten_nested_policy_action
 from share.utils.transformation_utils import rotation_from_extrinsic_xyz, rotation_component_keys
+from share.processor.utils import policy_action_keys_for_robot, rotation_from_extrinsic_xyz, flatten_nested_policy_action, rotation_component_keys
+from share.teleoperators.utils import TeleopEvents
 
 for _registry_name in (
     "to_nested_action",
@@ -31,7 +32,6 @@ for _registry_name in (
     "relative_frame_action",
 ):
     ProcessorStepRegistry.unregister(_registry_name)
-
 
 @dataclass
 @ProcessorStepRegistry.register("to_nested_action")
