@@ -96,6 +96,9 @@ class RecordConfig:
     interactive: bool = False
 
     def __post_init__(self):
+
+        # todo: per primitive
+
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
         policy_path = parser.get_path_arg("policy")
 
