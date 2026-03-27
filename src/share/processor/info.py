@@ -8,6 +8,14 @@ from lerobot.processor.hil_processor import TELEOP_ACTION_KEY, _check_teleop_wit
 from share.processor.utils import FootSwitchHandler
 from share.teleoperators.utils import TeleopEvents
 
+for _registry_name in (
+    "add_teleop_action_on_intervention_as_complementary_data",
+    "add_teleop_events_as_info",
+    "add_footswitch_events_as_info",
+    "add_keyboard_events_as_info",
+):
+    ProcessorStepRegistry.unregister(_registry_name)
+
 
 @ProcessorStepRegistry.register("add_teleop_action_on_intervention_as_complementary_data")
 @dataclass

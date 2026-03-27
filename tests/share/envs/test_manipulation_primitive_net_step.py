@@ -17,7 +17,7 @@ from lerobot.utils.constants import ACTION
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import (
     ManipulationPrimitiveNet,
 )
-from share.envs.manipulation_primitive_net.transitions import TransitionOutcome
+from share.envs.manipulation_primitive_net.transitions import Outcome
 
 
 class DummyEnv:
@@ -77,7 +77,7 @@ class StaticActionProcessor(IdentityProcessor):
 class StaticTransition:
     """Transition stub returning a fixed outcome."""
 
-    def __init__(self, source: str, target: str, outcome: TransitionOutcome):
+    def __init__(self, source: str, target: str, outcome: Outcome):
         self.source = source
         self.target = target
         self._outcome = outcome
@@ -174,7 +174,7 @@ def test_mp_net_step_applies_transition_outcome_and_switches_active_primitive():
                 StaticTransition(
                     source="pick",
                     target="place",
-                    outcome=TransitionOutcome(reward=1.75, terminated=True, reason="success"),
+                    outcome=Outcome(reward=1.75, terminated=True, reason="success"),
                 )
             ]
         },
@@ -222,7 +222,7 @@ def test_mp_net_reset_routes_from_reset_primitive_to_start(monkeypatch):
                 StaticTransition(
                     source="reset",
                     target="start",
-                    outcome=TransitionOutcome(terminated=True, reason="reset_complete"),
+                    outcome=Outcome(terminated=True, reason="reset_complete"),
                 )
             ],
             "start": [],

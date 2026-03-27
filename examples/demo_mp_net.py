@@ -3,10 +3,19 @@ import numpy as np
 from typing import Any
 
 from share.envs.manipulation_primitive.task_frame import TaskFrame, PolicyMode, ControlMode
-from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
+from share.envs.manipulation_primitive.config_manipulation_primitive import (
+    ManipulationPrimitiveConfig,
+    MoveDeltaPrimitiveConfig,
+    OpenLoopTrajectoryPrimitiveConfig,
+)
 from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
-from share.envs.manipulation_primitive_net.transitions import OnObservationThreshold, Always, OnTimeLimit
+from share.envs.manipulation_primitive_net.transitions import (
+    Always,
+    OnObservationThreshold,
+    OnSuccess,
+    OnTargetPoseReached,
+)
 from share.utils.mock_utils import MockRobot, MockKinematicsSolver, MockTeleoperator
 
 
@@ -41,12 +50,13 @@ teleop = MockTeleoperator("mock_robot", is_delta=True)
 
 
 # 1. Search (Start State)
-search_cfg = ManipulationPrimitiveConfig(
+search_cfg = MoveDeltaPrimitiveConfig(
     task_frame={"random_bot": TaskFrame(
         target=[0.4, 0.0, 0.4, 0, 0, 0],
         policy_mode=[PolicyMode.RELATIVE] * 3 + [None] * 3,
         control_mode=[ControlMode.POS] * 6
-    )}
+    )},
+    delta={"random_bot": [0.05, 0.0, 0.0, 0.0, 0.0, 0.0]},
 )
 
 # 2. Final Stage (Terminal)
@@ -56,8 +66,11 @@ final_success_cfg = ManipulationPrimitiveConfig(
 )
 
 # 3. Reset Step 1: Retract
-retract_cfg = ManipulationPrimitiveConfig(
+retract_cfg = OpenLoopTrajectoryPrimitiveConfig(
     task_frame={"random_bot": TaskFrame(target=[0.4, 0.0, 0.6, 0, 0, 0])},
+    delta={"random_bot": [0.0, 0.0, 0.2, 0.0, 0.0, 0.0]},
+    duration_substeps=6,
+    substeps_per_step=2,
 )
 
 # 4. Reset Step 2: Home
@@ -84,8 +97,8 @@ net_config = ManipulationPrimitiveNetConfig(
             operator="ge"
         ),
         Always(source="final_stage", target="retract"),
-        OnTimeLimit(source="retract", target="home", max_steps=5),
-        OnTimeLimit(source="home", target="search", max_steps=5),
+        OnSuccess(source="retract", target="home", success_key="primitive_complete"),
+        OnTargetPoseReached(source="home", target="search", robot_name="random_bot", axes=["x"], tolerance=0.05),
     ],
 )
 

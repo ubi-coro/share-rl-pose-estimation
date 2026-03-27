@@ -24,7 +24,15 @@ class ManipulationPrimitive(gymnasium.Env):
         cameras: dict[str, Camera],
         display_cameras: bool = False
     ):
-        """Initialize robot/camera handles and action slicing metadata."""
+        """Initialize robot/camera handles and primitive runtime state.
+
+        Args:
+            task_frame: Per-robot task-frame command objects mutated by the
+                primitive config and consumed by the robot interfaces.
+            robot_dict: Connected robots keyed by primitive robot name.
+            cameras: Connected cameras exposed through the env observation dict.
+            display_cameras: Whether ``render()`` should open live camera views.
+        """
         self.robot_dict = robot_dict
         self.task_frame = task_frame
         self.cameras = cameras
@@ -33,16 +41,24 @@ class ManipulationPrimitive(gymnasium.Env):
         self.current_step = 0
         self._motor_keys: set[str] = set()
         self._is_task_frame_robot: dict[str, bool] = check_task_frame_robot(robot_dict)
+        self.reset_runtime_state()
+        self.apply_task_frames()
         for name, robot in self.robot_dict.items():
-            if self._is_task_frame_robot[name]:
-                robot.set_task_frame(self.task_frame[name])
             self._motor_keys.update([f"{name}.{key}" for key in robot._motors_ft])
 
     def step(self, action: dict[str, dict[str, float]]) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
-        """Apply a per-robot action dict and return fresh observations."""
+        """Apply one outer primitive step.
+
+        Args:
+            action: Nested action dictionary keyed first by robot name and then
+                by low-level command key such as ``x.ee_pos`` or ``joint_1.pos``.
+
+        Returns:
+            Standard gym ``(observation, reward, terminated, truncated, info)``
+            values for one primitive step.
+        """
+        self.apply_task_frames()
         for name, robot in self.robot_dict.items():
-            if self._is_task_frame_robot[name]:
-                robot.set_task_frame(self.task_frame[name])
             robot.send_action(action.get(name, {}))
 
         obs = self._get_observation()
@@ -63,16 +79,23 @@ class ManipulationPrimitive(gymnasium.Env):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[ObsType, dict[str, Any]]:
-        """Reset counters and resend configured task frames when supported."""
+        """Reset counters and clear env-owned runtime state.
+
+        Args:
+            seed: Optional gym reset seed.
+            options: Optional reset payload forwarded by the MP-Net runtime.
+
+        Returns:
+            A fresh raw observation and default info payload for the primitive.
+        """
         super().reset(seed=seed, options=options)
 
         # Manipulation primitives do not execute an autonomous reset trajectory by default.
         # We only re-send the configured task frame to robots that support task-frame commands.
-        for name, robot in self.robot_dict.items():
-            if self._is_task_frame_robot.get(name, False):
-                robot.set_task_frame(self.task_frame[name])
+        self.apply_task_frames()
 
         self.current_step = 0
+        self.reset_runtime_state()
         obs = self._get_observation()
         return obs, self._get_info()
 
@@ -91,8 +114,37 @@ class ManipulationPrimitive(gymnasium.Env):
             if robot_dict.is_connected:
                 robot_dict.disconnect()
 
+    def apply_task_frames(self) -> None:
+        """Re-send the current task frame to every robot that supports it."""
+        for name, robot in self.robot_dict.items():
+            if self._is_task_frame_robot.get(name, False):
+                robot.set_task_frame(self.task_frame[name])
+
+    def reset_runtime_state(self) -> None:
+        """Clear runtime-only target/progress state owned by this env."""
+        self._target_pose_info_key: str | None = None
+        self._target_pose: dict[str, list[float]] = {}
+        self._primitive_complete = False
+        self._trajectory_progress = 0.0
+
+    def set_target_pose(self, target_pose: dict[str, list[float]], info_key: str | None) -> None:
+        """Store the current runtime target pose and update task-frame targets.
+
+        Args:
+            target_pose: Per-robot 6D target poses in this primitive's task
+                frame. These values become the live task-frame targets.
+            info_key: Optional info key used to publish the target pose.
+        """
+        self._target_pose = {name: list(pose) for name, pose in target_pose.items()}
+        self._target_pose_info_key = info_key
+        for name, pose in self._target_pose.items():
+            if name not in self.task_frame:
+                continue
+            for axis in range(min(len(self.task_frame[name].target), len(pose))):
+                self.task_frame[name].target[axis] = float(pose[axis])
+
     def _get_observation(self):
-        """Collect camera pixels and robot observations into one dict."""
+        """Collect raw camera pixels and robot observations into one dict."""
         obs_dict = {}
 
         for cam_key, cam in self.cameras.items():
@@ -104,7 +156,132 @@ class ManipulationPrimitive(gymnasium.Env):
 
         return obs_dict
 
-    @staticmethod
-    def _get_info():
-        """Return default per-step info payload."""
-        return {TeleopEvents.IS_INTERVENTION: False}
+    def _get_info(self):
+        """Return the primitive runtime info payload for the current step."""
+        info = {
+            TeleopEvents.IS_INTERVENTION: False,
+            "primitive_complete": bool(self._primitive_complete),
+            "trajectory_progress": float(self._trajectory_progress),
+        }
+        if self._target_pose_info_key and self._target_pose:
+            info[self._target_pose_info_key] = {
+                name: list(pose) for name, pose in self._target_pose.items()
+            }
+        return info
+
+
+class OpenLoopTrajectoryPrimitive(ManipulationPrimitive):
+    """Primitive env variant that executes a scripted chunk per outer step."""
+
+    def __init__(
+        self,
+        task_frame: dict[str, TaskFrame],
+        robot_dict: dict[str, Robot],
+        cameras: dict[str, Camera],
+        open_loop_config: Any,
+        display_cameras: bool = False,
+    ):
+        """Initialize the scripted open-loop primitive env.
+
+        Args:
+            task_frame: Per-robot task-frame command objects.
+            robot_dict: Connected robots keyed by primitive robot name.
+            cameras: Connected cameras exposed through the env observation dict.
+            open_loop_config: Config object supplying trajectory timing params.
+            display_cameras: Whether ``render()`` should open live camera views.
+        """
+        self.open_loop_config = open_loop_config
+        self._trajectory_substeps = 0
+        super().__init__(
+            task_frame=task_frame,
+            robot_dict=robot_dict,
+            cameras=cameras,
+            display_cameras=display_cameras,
+        )
+
+    @property
+    def uses_autonomous_step(self) -> bool:
+        return True
+
+    def reset_runtime_state(self) -> None:
+        super().reset_runtime_state()
+        self._start_pose: dict[str, list[float]] = {}
+        self._trajectory_substeps = 0
+
+    def configure_trajectory(
+        self,
+        start_pose: dict[str, list[float]],
+        target_pose: dict[str, list[float]],
+    ) -> None:
+        """Initialize one scripted trajectory from entry-time poses.
+
+        Args:
+            start_pose: Per-robot 6D start poses in this primitive's task frame.
+            target_pose: Per-robot 6D target poses in this primitive's task
+                frame. These are also published as the env target pose.
+        """
+        self._start_pose = {name: list(pose) for name, pose in start_pose.items()}
+        self.set_target_pose(target_pose=target_pose, info_key=self._target_pose_info_key)
+        self._primitive_complete = False
+        self._trajectory_progress = 0.0
+        self._trajectory_substeps = 0
+
+    def step(self, action: dict[str, dict[str, float]]) -> tuple[dict[str, np.ndarray], float, bool, bool, dict[str, Any]]:
+        """Run a scripted chunk of the open-loop trajectory.
+
+        Args:
+            action: Ignored in v1. The primitive follows its scripted internal
+                trajectory instead of consuming an external policy action.
+
+        Returns:
+            Standard gym ``(observation, reward, terminated, truncated, info)``
+            values after executing up to ``substeps_per_step`` internal robot
+            steps.
+        """
+        remaining = max(0, int(self.open_loop_config.duration_substeps) - self._trajectory_substeps)
+        substeps = min(int(self.open_loop_config.substeps_per_step), remaining)
+        if substeps <= 0:
+            self._primitive_complete = True
+            return self._get_observation(), 0.0, False, False, self._get_info()
+
+        obs = self._get_observation()
+        reward = 0.0
+        terminated = False
+        truncated = False
+        for _ in range(substeps):
+            self._trajectory_substeps += 1
+            alpha = self._trajectory_substeps / float(self.open_loop_config.duration_substeps)
+            scripted_action = self._interpolated_action(alpha)
+            obs, step_reward, terminated, truncated, _info = super().step(scripted_action)
+            reward += step_reward
+            self._trajectory_progress = alpha
+            if terminated or truncated:
+                break
+
+        if self._trajectory_substeps >= int(self.open_loop_config.duration_substeps):
+            self._primitive_complete = True
+        return obs, reward, terminated, truncated, self._get_info()
+
+    def _interpolated_action(self, alpha: float) -> dict[str, dict[str, float]]:
+        """Build one low-level action dict from the current trajectory alpha.
+
+        Args:
+            alpha: Normalized trajectory progress in ``[0, 1]``.
+
+        Returns:
+            Nested low-level robot commands interpolated between the configured
+            start pose and target pose for each robot.
+        """
+        action: dict[str, dict[str, float]] = {}
+        for name, frame in self.task_frame.items():
+            start_pose = self._start_pose.get(name, [float(v) for v in frame.target])
+            target_pose = self._target_pose.get(name, [float(v) for v in frame.target])
+            pose = [
+                float(start_pose[axis] + alpha * (target_pose[axis] - start_pose[axis]))
+                for axis in range(len(frame.target))
+            ]
+            action[name] = {
+                frame.action_key_for_axis(axis): float(pose[axis])
+                for axis in range(len(frame.target))
+            }
+        return action
