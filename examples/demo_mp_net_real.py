@@ -1,3 +1,7 @@
+"""Real UR example showing home, move-delta, adaptive, and open-loop primitives."""
+
+from __future__ import annotations
+
 import time
 
 import torch
@@ -6,108 +10,136 @@ from lerobot.processor import TransitionKey
 from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.robot_utils import precise_sleep
 
-from share.envs.manipulation_primitive_net.transitions import OnSuccess
-from share.envs.manipulation_primitive.task_frame import TaskFrame, PolicyMode, ControlMode
 from share.envs.manipulation_primitive.config_manipulation_primitive import (
-    ManipulationPrimitiveConfig,
     EventConfig,
+    GripperConfig,
+    ManipulationPrimitiveConfig,
     ManipulationPrimitiveProcessorConfig,
-    GripperConfig
+    MoveDeltaPrimitiveConfig,
+    OpenLoopTrajectoryPrimitiveConfig,
 )
+from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TaskFrame
 from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
+from share.envs.manipulation_primitive_net.transitions import OnSuccess, OnTargetPoseReached
 from share.robots.ur import URConfig
 from share.teleoperators.spacemouse import SpacemouseConfig
 
-_event = EventConfig(
+
+EVENTS = EventConfig(
     foot_switch_mapping={
-        (TeleopEvents.SUCCESS,): {"device": 4, "toggle": False}
+        (TeleopEvents.SUCCESS,): {"device": 4, "toggle": False},
     }
 )
 
-_gripper = GripperConfig(
-    enable=True,
-    discretize=True
-)
+GRIPPER = GripperConfig(enable=True, discretize=True)
 
-reset_cfg = ManipulationPrimitiveConfig(
+
+home_cfg = ManipulationPrimitiveConfig(
+    notes="Drive to a comfortable inspection hover pose.",
     task_frame=TaskFrame(
-        target=[0.0] * 6,
-        policy_mode=[PolicyMode.RELATIVE] * 6,
+        origin=[0.45, -0.10, 0.22, 0.0, 0.0, 0.0],
+        target=[0.0, 0.0, 0.20, 0.0, 0.0, 0.0],
+        policy_mode=[None] * 6,
         control_mode=[ControlMode.POS] * 6,
-        kp=[2500, 2500, 2500, 100, 100, 100],
-        kd=[960, 960, 320, 6, 6, 6]
     ),
-    processor=ManipulationPrimitiveProcessorConfig(events=_event)
+    processor=ManipulationPrimitiveProcessorConfig(events=EVENTS, gripper=GRIPPER),
 )
 
-learn_cfg = ManipulationPrimitiveConfig(
+descend_cfg = MoveDeltaPrimitiveConfig(
+    notes="Approach the work surface in world coordinates without changing yaw.",
     task_frame=TaskFrame(
-        target=[0.0] * 6,
-        policy_mode=[PolicyMode.RELATIVE] * 3 + [None] * 3,
-        control_mode=[ControlMode.POS] * 3 + [ControlMode.VEL] * 3,
-        kp=[2500, 2500, 2500, 100, 100, 100],
-        kd=[960, 960, 320, 6, 6, 6]
+        origin=[0.45, -0.10, 0.22, 0.0, 0.0, 0.0],
+        target=[0.0, 0.0, 0.20, 0.0, 0.0, 0.0],
+        policy_mode=[None] * 6,
+        control_mode=[ControlMode.POS] * 6,
     ),
-    processor=ManipulationPrimitiveProcessorConfig(events=_event, gripper=_gripper)
+    delta=[0.0, 0.0, -0.08, 0.0, 0.0, 0.0],
+    delta_frame="world",
+    processor=ManipulationPrimitiveProcessorConfig(events=EVENTS, gripper=GRIPPER),
 )
 
-# Define the Net with Diverse Transitions
+inspect_cfg = ManipulationPrimitiveConfig(
+    notes="Human/policy cooperatively sweeps the contact patch while keeping attitude fixed.",
+    task_frame=TaskFrame(
+        origin=[0.45, -0.10, 0.22, 0.0, 0.0, 0.0],
+        target=[0.0, 0.0, 0.12, 0.0, 0.0, 0.0],
+        policy_mode=[PolicyMode.RELATIVE, PolicyMode.RELATIVE, None, None, None, None],
+        control_mode=[ControlMode.POS, ControlMode.POS, ControlMode.POS, ControlMode.POS, ControlMode.POS, ControlMode.POS],
+    ),
+    processor=ManipulationPrimitiveProcessorConfig(events=EVENTS, gripper=GRIPPER),
+)
+
+retract_cfg = OpenLoopTrajectoryPrimitiveConfig(
+    notes="Scripted retreat that lifts and backs away before the next cycle.",
+    task_frame=TaskFrame(
+        origin=[0.45, -0.10, 0.22, 0.0, 0.0, 0.0],
+        target=[0.0, 0.0, 0.12, 0.0, 0.0, 0.0],
+        policy_mode=[None] * 6,
+        control_mode=[ControlMode.POS] * 6,
+    ),
+    delta=[0.0, -0.05, 0.14, 0.0, 0.0, 0.0],
+    delta_frame="world",
+    duration_substeps=18,
+    substeps_per_step=3,
+    processor=ManipulationPrimitiveProcessorConfig(events=EVENTS, gripper=GRIPPER),
+)
+
+
 net_cfg = ManipulationPrimitiveNetConfig(
     fps=30,
-    start_primitive="reset",
-    reset_primitive="reset",
+    start_primitive="home",
+    reset_primitive="home",
     primitives={
-        "reset": reset_cfg,
-        "learn": learn_cfg,
+        "home": home_cfg,
+        "descend": descend_cfg,
+        "inspect": inspect_cfg,
+        "retract": retract_cfg,
     },
     transitions=[
-        OnSuccess(source="reset", target="learn"),
-        OnSuccess(source="learn", target="reset"),
-        #OnTimeLimit(source="learn", target="reset", max_steps=1000)
+        OnTargetPoseReached(source="home", target="descend", axes=["z"], tolerance=0.01),
+        OnTargetPoseReached(source="descend", target="inspect", axes=["z"], tolerance=0.01),
+        OnSuccess(source="inspect", target="retract"),
+        OnSuccess(source="retract", target="home", success_key="primitive_complete"),
     ],
     robot=URConfig(
         robot_ip="172.22.22.2",
         frequency=500,
         soft_real_time=True,
         rt_core=3,
-        use_gripper=True
+        use_gripper=True,
     ),
-    teleop=SpacemouseConfig(action_scale=[0.5, 0.5, 0.5, 0.7, 0.7, 0.7]),
+    teleop=SpacemouseConfig(action_scale=[0.25, 0.25, 0.20, 0.50, 0.50, 0.50]),
     cameras={
-        "main": RealSenseCameraConfig(serial_number_or_name="352122273250")
-    }
+        "main": RealSenseCameraConfig(serial_number_or_name="352122273250"),
+    },
 )
 
-def run_demo():
+
+def run_demo() -> None:
+    """Run one continuous inspection loop on the configured UR setup."""
     net = ManipulationPrimitiveNet(net_cfg)
-    net.reset()
+    transition = net.reset()
 
-    print(f"--- ROLLOUT START: {net.active_primitive} ---")
+    print(f"start -> {net.active_primitive}")
 
-    # Run until we hit the terminal stage
-    for i in range(100_000):
-        start_loop_t = time.perf_counter()
-
-        # Dummy action tensor matching the search primitive's 3 adaptive dimensions
-        action = torch.randn(net.action_dim)
-
+    for _step in range(100_000):
+        loop_t0 = time.perf_counter()
+        action = torch.zeros(net.action_dim, dtype=torch.float32)
         transition = net.step(action)
 
-        if transition[TransitionKey.DONE]:
-            net.reset()
+        if transition[TransitionKey.DONE] or transition[TransitionKey.TRUNCATED]:
+            transition = net.reset()
 
-        dt_load = time.perf_counter() - start_loop_t
-        precise_sleep(1 / net.config.fps - dt_load)
+        info = transition[TransitionKey.INFO]
+        dt = time.perf_counter() - loop_t0
+        precise_sleep(1 / net.config.fps - dt)
         print(
-            f"Running [{net._active}], "
-            f"dt_load: {dt_load * 1000:5.2f}ms ({1 / dt_load:3.1f}hz)"
-            f"{transition[TransitionKey.ACTION]}"
+            f"[{net.active_primitive}] "
+            f"primitive_step={info.get('primitive_step', 0):04d} "
+            f"reason={info.get('transition_reason')} "
+            f"progress={info.get('trajectory_progress', 0.0):.2f}"
         )
-
-    # The "Two Processor Step Reset" happens here
-    print("\n--- TRIGGERING SYSTEM RESET ---")
-    net.reset()
 
 
 if __name__ == "__main__":

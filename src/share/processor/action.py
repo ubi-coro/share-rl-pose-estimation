@@ -19,7 +19,18 @@ from share.envs.manipulation_primitive.task_frame import (
     TASK_FRAME_AXIS_NAMES
 )
 from share.envs.utils import check_delta_teleoperator
-from share.processor.utils import policy_action_keys_for_robot, rotation_from_extrinsic_xyz, flatten_nested_policy_action, rotation_component_keys
+from share.processor.utils import policy_action_keys_for_robot, flatten_nested_policy_action
+from share.utils.transformation_utils import rotation_from_extrinsic_xyz, rotation_component_keys
+
+for _registry_name in (
+    "to_nested_action",
+    "match_teleop_to_policy_action",
+    "task_frame_intervention_action_processor",
+    "discretize_gripper_processor",
+    "to_joint_action_processor",
+    "relative_frame_action",
+):
+    ProcessorStepRegistry.unregister(_registry_name)
 
 
 @dataclass

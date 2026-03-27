@@ -12,7 +12,16 @@ from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry, Obs
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
 
 from share.envs.manipulation_primitive.task_frame import TASK_FRAME_AXIS_NAMES
-from share.processor.utils import rotation_from_extrinsic_xyz, euler_xyz_from_rotation
+from share.utils.transformation_utils import rotation_from_extrinsic_xyz, euler_xyz_from_rotation
+
+for _registry_name in (
+    "default_observation_processor",
+    "joints_to_ee_observation",
+    "relative_frame_observation",
+    "joint_velocity_processor",
+    "current_processor",
+):
+    ProcessorStepRegistry.unregister(_registry_name)
 
 
 @dataclass
@@ -633,4 +642,3 @@ class MotorCurrentProcessorStep(ObservationProcessorStep):
         return {
             "enable": self.enable
         }
-
