@@ -29,6 +29,12 @@ def euler_xyz_from_rotation(rotation: Rotation) -> list[float]:
     return rotation.as_euler("xyz", degrees=False).tolist()
 
 
+def euler_xyz_from_rotvec(rotvec: list[float]) -> list[float]:
+    """Convert a rotation vector into user-facing XYZ roll-pitch-yaw angles."""
+
+    return euler_xyz_from_rotation(Rotation.from_rotvec(rotvec))
+
+
 def task_pose_to_world_pose(pose: list[float], origin: list[float] | None) -> list[float]:
     """Express a task-frame pose in world coordinates.
 
@@ -161,9 +167,26 @@ def get_robot_pose_from_observation(observation: dict[str, Any], robot_name: str
             return float(list(value)[0])
         return float(value)
 
-    pose: list[float] = []
+    position: list[float] = []
+    raw_rotvec: list[float] = []
     missing: list[str] = []
-    for axis_name in TASK_FRAME_AXIS_NAMES:
+    for axis_name in TASK_FRAME_AXIS_NAMES[:3]:
+        aliases = (axis_name,)
+        value: float | None = None
+        for alias in aliases:
+            for suffix in (".ee_pos", ".pos"):
+                key = f"{robot_name}.{alias}{suffix}"
+                if key in observation:
+                    value = _to_float(observation[key])
+                    break
+            if value is not None:
+                break
+        if value is None:
+            missing.append(axis_name)
+            continue
+        position.append(value)
+
+    for axis_name in TASK_FRAME_AXIS_NAMES[3:6]:
         aliases = ROTATION_AXIS_ALIASES.get(axis_name, (axis_name,))
         value: float | None = None
         for alias in aliases:
@@ -177,11 +200,10 @@ def get_robot_pose_from_observation(observation: dict[str, Any], robot_name: str
         if value is None:
             missing.append(axis_name)
             continue
-        pose.append(value)
+        raw_rotvec.append(value)
 
     if missing:
         raise KeyError(
             f"Observation is missing EE pose axes for robot '{robot_name}': {', '.join(missing)}."
         )
-    return pose
-
+    return [*position, *euler_xyz_from_rotvec(raw_rotvec)]
