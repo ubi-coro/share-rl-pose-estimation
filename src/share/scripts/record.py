@@ -1,7 +1,6 @@
 import logging
 import time
 from dataclasses import asdict
-from pathlib import Path
 from pprint import pformat
 from typing import Any
 
@@ -16,7 +15,6 @@ from lerobot.processor import (
     PolicyProcessorPipeline,
     TransitionKey
 )
-from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import ACTION, REWARD, DONE
 from lerobot.utils.control_utils import predict_action
 from lerobot.utils.robot_utils import precise_sleep
@@ -30,6 +28,7 @@ from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 from share.configs.record import RecordConfig
 from share.debug.mpnet_debug import MPNetDebugger
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
+from share.teleoperators import TeleopEvents
 from share.utils.control_utils import make_policies_and_datasets
 from share.utils.video_utils import MultiVideoEncodingManager
 
@@ -172,6 +171,9 @@ def record_loop(
         dt_loop = time.perf_counter() - start_loop_t
         logging.info(
             f"[{task}] "
+            f"{transition[TransitionKey.OBSERVATION]["main.x.ee_pos"]}, "
+            f"{transition[TransitionKey.OBSERVATION]["main.y.ee_pos"]}, "
+            f"{transition[TransitionKey.OBSERVATION]["main.z.ee_pos"]}"
             f"dt_loop: {dt_loop * 1000:5.2f}ms ({1 / dt_loop:3.1f}hz), "
             f"dt_load: {dt_load * 1000:5.2f}ms ({1 / dt_load:3.1f}hz)"
         )

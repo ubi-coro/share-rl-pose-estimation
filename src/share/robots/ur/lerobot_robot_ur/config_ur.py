@@ -57,18 +57,12 @@ class URConfig(RobotConfig):
     wrench_limits: list[float] = field(default_factory = lambda: [30.0, 30.0, 30.0, 3.0, 3.0, 3.0])
     speed_limits: list[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])
 
-    # deadband
-    deadband_pos: float = 0.0005  # [m/s]
-    deadband_rot: float = 0.001  # [rad/s]
-    leak_rate_pos: float = 20.0  # [1/m]
-    leak_rate_rot: float = 10.0  # [1/s]
-
-    # contact-aware scaling of wrench limits
-    compliance_safety_mode: Literal["adaptive_wrench_limits", "reference_limits"] = "adaptive_limits"
-    compliance_safety_enable: list[bool] = field(default_factory = lambda: [False] * 6)
-    compliance_desired_wrench: list[float] = field(default_factory = lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])  # desired max contact force at equilibrium (N)
-    compliance_adaptive_limit_theta: Optional[list[float]] = None  # minimum force limit scaling factor, usually computed automatically
-    compliance_adaptive_limit_min: list[float] = field(default_factory = lambda: [0.1] * 6)  # minimum force limit scaling factor
+    # compliance / anti-windup behavior
+    compliance_safety_mode: Literal["none", "adaptive_wrench_limits", "reference_limits", "both"] = "both"
+    compliance_safety_enable: list[bool] = field(default_factory=lambda: [False] * 6)
+    compliance_desired_wrench: list[float] = field(default_factory=lambda: [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])
+    compliance_adaptive_limit_theta: Optional[list[float]] = None
+    compliance_adaptive_limit_min: list[float] = field(default_factory=lambda: [0.1] * 6)
     
     # flag
     use_degrees: bool = False  # Set to `True` for backward compatibility with previous policies/dataset

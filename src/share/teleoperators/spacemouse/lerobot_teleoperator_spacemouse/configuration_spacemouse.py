@@ -22,7 +22,7 @@ from lerobot.teleoperators import TeleoperatorConfig, TeleopEvents
 
 @TeleoperatorConfig.register_subclass("spacemouse")
 @dataclass
-class SpacemouseConfig(TeleoperatorConfig):
+class SpaceMouseConfig(TeleoperatorConfig):
     """KeyboardTeleopConfig"""
     device: Optional[str] = None
     path: Optional[str] = None

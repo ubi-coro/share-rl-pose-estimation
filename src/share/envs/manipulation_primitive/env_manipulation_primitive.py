@@ -1,17 +1,16 @@
-from typing import SupportsFloat, Any
+from typing import Any
 
 import gymnasium
 import numpy as np
-import torch
-from gymnasium.core import ActType, ObsType
+from gymnasium.core import ObsType
 
-from lerobot.teleoperators import TeleopEvents
 from lerobot.utils.constants import OBS_IMAGES
 from lerobot.cameras import Camera
 from lerobot.robots import Robot
 
-from .task_frame import TaskFrame
-from ..utils import check_task_frame_robot
+from share.envs.manipulation_primitive.task_frame import TaskFrame
+from share.envs.utils import check_task_frame_robot
+from share.teleoperators import TeleopEvents
 
 
 class ManipulationPrimitive(gymnasium.Env):

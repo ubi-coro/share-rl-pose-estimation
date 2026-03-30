@@ -10,7 +10,7 @@ from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeatur
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.pipeline_features import PREFIXES_TO_STRIP, strip_prefix, create_initial_features
 from lerobot.envs import EnvConfig
-from lerobot.teleoperators import Teleoperator, TeleopEvents
+from lerobot.teleoperators import Teleoperator
 from lerobot.robots import Robot
 from lerobot.processor import DataProcessorPipeline, DeviceProcessorStep, ImageCropResizeProcessorStep
 from lerobot.processor.converters import identity_transition
@@ -50,6 +50,7 @@ from share.processor.observation import (
     RelativeFrameObservationProcessor,
     DefaultObservationProcessor
 )
+from share.teleoperators import TeleopEvents
 from share.utils.transformation_utils import task_pose_to_world_pose, compose_delta_pose, world_pose_to_task_pose
 
 PRIMITIVE_TARGET_POSE_INFO_KEY = "primitive_target_pose"

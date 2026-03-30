@@ -4,10 +4,9 @@ from typing import Any, Literal
 
 from draccus import ChoiceRegistry
 
-from lerobot.teleoperators import TeleopEvents
-
 from share.envs.manipulation_primitive.config_manipulation_primitive import PRIMITIVE_TARGET_POSE_INFO_KEY
 from share.envs.utils import to_scalar, resolve_value, compare, axis_to_index
+from share.teleoperators import TeleopEvents
 from share.utils.transformation_utils import get_robot_pose_from_observation
 
 

@@ -452,6 +452,80 @@ class RTDETaskFrameController(mp.Process):
 
         return keep_running, active_space, x_cmd, q_cmd
 
+    def _reference_limits_enabled(self) -> bool:
+        return self.config.compliance_safety_mode in ("reference_limits", "both")
+
+    def _adaptive_wrench_limits_enabled(self) -> bool:
+        return self.config.compliance_safety_mode in ("adaptive_wrench_limits", "both")
+
+    def _get_reference_error_limit(self, axis: int) -> float:
+        """Return max allowed reference error for a POS axis from soft wrench budget."""
+        if not self.config.compliance_safety_enable[axis]:
+            return np.inf
+
+        f_soft = float(self.config.wrench_limits[axis])
+        if f_soft <= 0.0:
+            return 0.0
+
+        kp = float(self.kp[axis])
+        if kp <= 0.0:
+            return np.inf
+
+        return f_soft / kp
+
+    def _clamp_virtual_target_error_task(self, x_cmd: np.ndarray, pose_F: np.ndarray) -> np.ndarray:
+        """Clamp stored task-space virtual target error relative to current pose.
+
+        Translation is clipped directly per axis.
+        Rotation is clipped in wrapped RPY coordinates, consistent with the controller's
+        constrained-orientation interface.
+        """
+        out = np.asarray(x_cmd, dtype=np.float64).copy()
+
+        if not self._reference_limits_enabled():
+            return out
+
+        # --- translation ---
+        for i in range(3):
+            if not (
+                self.config.compliance_safety_enable[i]
+                and ControlMode(self.control_mode[i]) == ControlMode.POS
+                and DeltaMode(self.delta_mode[i]) == DeltaMode.RELATIVE
+            ):
+                continue
+
+            e_max = self._get_reference_error_limit(i)
+            if not np.isfinite(e_max):
+                continue
+
+            err = float(out[i] - pose_F[i])
+            out[i] = pose_F[i] + np.clip(err, -e_max, e_max)
+
+        # --- rotation: clip relative stored error in wrapped RPY ---
+        rot_axes = [
+            i for i in range(3, 6)
+            if (
+                self.config.compliance_safety_enable[i]
+                and ControlMode(self.control_mode[i]) == ControlMode.POS
+                and DeltaMode(self.delta_mode[i]) == DeltaMode.RELATIVE
+            )
+        ]
+        if rot_axes:
+            cmd_rpy = self.wrap_to_pi(self._rotvec_to_rpy(out[3:6]).astype(np.float64))
+            pose_rpy = self.wrap_to_pi(self._rotvec_to_rpy(pose_F[3:6]).astype(np.float64))
+
+            rpy_err = self.wrap_to_pi(cmd_rpy - pose_rpy)
+            for axis in rot_axes:
+                j = axis - 3
+                e_max = self._get_reference_error_limit(axis)
+                if not np.isfinite(e_max):
+                    continue
+                rpy_err[j] = np.clip(rpy_err[j], -e_max, e_max)
+
+            out[3:6] = self._rpy_to_rotvec(self.wrap_to_pi(pose_rpy + rpy_err))
+
+        return out
+
     def zero_ft(self):
         """Re-zero the force-torque sensor in the control loop."""
         # We only need the cmd field for ZERO_FT, everything else can be None
@@ -658,14 +732,11 @@ class RTDETaskFrameController(mp.Process):
 
                         if control_mode_i == ControlMode.POS and delta_mode_i == DeltaMode.ABSOLUTE:
                             x_cmd[i] = self.target[i]
+
                         elif control_mode_i == ControlMode.POS and delta_mode_i == DeltaMode.RELATIVE:
-                            # integrate velocity, or leak back when input velocity is in deadband
                             v_cmd = float(self.target[i])
-                            if abs(v_cmd) > self.config.deadband_pos:
-                                x_cmd[i] += v_cmd * dt
-                            else:
-                                # leak virtual target back to actual pose
-                                x_cmd[i] += -self.config.leak_rate_pos * (x_cmd[i] - pose_F[i]) * dt
+                            x_cmd[i] += v_cmd * dt
+
                         elif control_mode_i == ControlMode.VEL or control_mode_i == ControlMode.WRENCH:
                             pass
 
@@ -684,7 +755,7 @@ class RTDETaskFrameController(mp.Process):
                         rpy_cmd[mask_abs_pos] = target_rpy[mask_abs_pos]
                         x_cmd[3:6] = self._rpy_to_rotvec(rpy_cmd)
 
-                    # SO(3) integration for angular velocity with deadband + leak
+                    # SO(3) integration for angular velocity
                     mask_delta_pos = np.array(
                         [
                             ControlMode(self.control_mode[i]) == ControlMode.POS
@@ -696,24 +767,15 @@ class RTDETaskFrameController(mp.Process):
                     if np.any(mask_delta_pos):
                         omega = np.zeros(3, dtype=float)
                         omega[mask_delta_pos] = np.array(self.target[3:6], dtype=float)[mask_delta_pos]
-                        omega_norm = np.linalg.norm(omega)
                         R_cmd = R.from_rotvec(x_cmd[3:6])
-
-                        if omega_norm > self.config.deadband_rot:
-                            dR_move = R.from_rotvec(omega * dt)
-                            R_cmd = dR_move * R_cmd
-                        else:
-                            R_act = R.from_rotvec(pose_F[3:6])
-                            R_err = R_act * R_cmd.inv()
-                            rot_err_vec = R_err.as_rotvec()
-                            rot_err_vec[~mask_delta_pos] = 0.0
-                            alpha = np.clip(self.config.leak_rate_rot * dt, 0.0, 1.0)
-                            dR_leak = R.from_rotvec(alpha * rot_err_vec)
-                            R_cmd = dR_leak * R_cmd
-
+                        dR_move = R.from_rotvec(omega * dt)
+                        R_cmd = dR_move * R_cmd
                         x_cmd[3:6] = R_cmd.as_rotvec()
 
+                    # first enforce task-space pose bounds
                     x_cmd = self.clip_pose(x_cmd)
+                    # then anti-windup: clamp stored virtual target error relative to actual pose
+                    x_cmd = self._clamp_virtual_target_error_task(x_cmd, pose_F)
                 elif active_space == ControlSpace.JOINT:
                     for i in range(len(q_cmd)):
                         if DeltaMode(self.delta_mode[i]) == DeltaMode.ABSOLUTE:
