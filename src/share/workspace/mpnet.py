@@ -15,6 +15,7 @@ from share.envs.manipulation_primitive_net.transitions import (
     Always,
     OnObservationThreshold,
     OnSuccess,
+    OnTargetPoseReached,
     OnTimeLimit,
     RewardClassifierTransition,
     Transition,
@@ -22,9 +23,14 @@ from share.envs.manipulation_primitive_net.transitions import (
 
 try:
     from lerobot.configs.policies import PreTrainedConfig
-    from share.envs.manipulation_primitive.config_manipulation_primitive import ManipulationPrimitiveConfig
+    from share.envs.manipulation_primitive.config_manipulation_primitive import (
+        MoveDeltaPrimitiveConfig,
+        OpenLoopTrajectoryPrimitiveConfig,
+        ManipulationPrimitiveConfig,
+    )
     from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TASK_FRAME_AXIS_NAMES, TaskFrame
     from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
+    PrimitiveConfig = ManipulationPrimitiveConfig
 
     REAL_MPNET_BACKEND = True
 except Exception:  # noqa: BLE001
@@ -104,13 +110,14 @@ except Exception:  # noqa: BLE001
             return cls(pretrained_path=Path(pretrained_name_or_path))
 
     @dataclass(slots=True)
-    class ManipulationPrimitiveConfig:
+    class PrimitiveConfig:
         task_frame: TaskFrame | dict[str, TaskFrame] = field(default_factory=TaskFrame)
         processor: dict[str, Any] = field(default_factory=dict)
         policy: PreTrainedConfig | None = None
         policy_overwrites: dict[str, Any] = field(default_factory=dict)
         notes: str | None = None
         is_terminal: bool = False
+        target_pose_info_key: str | None = "primitive_target_pose"
 
         def __post_init__(self) -> None:
             task_frames = self.task_frame.values() if isinstance(self.task_frame, dict) else [self.task_frame]
@@ -118,10 +125,28 @@ except Exception:  # noqa: BLE001
                 frame.__post_init__()
 
     @dataclass(slots=True)
+    class ManipulationPrimitiveConfig(PrimitiveConfig):
+        pass
+
+    @dataclass(slots=True)
+    class MoveDeltaPrimitiveConfig(ManipulationPrimitiveConfig):
+        delta: list[float] | dict[str, list[float]] = field(default_factory=lambda: [0.0] * 6)
+        delta_frame: str | dict[str, str] = "world"
+        publish_target_info: bool | dict[str, bool] = True
+
+    @dataclass(slots=True)
+    class OpenLoopTrajectoryPrimitiveConfig(MoveDeltaPrimitiveConfig):
+        duration_substeps: int = 10
+        substeps_per_step: int = 1
+        controller_hz: float | None = None
+        substep_dt_s: float | None = None
+        interruption_policy: str = "stop_on_events"
+
+    @dataclass(slots=True)
     class ManipulationPrimitiveNetConfig:
         start_primitive: str | None = None
         reset_primitive: str | None = None
-        primitives: dict[str, ManipulationPrimitiveConfig] = field(default_factory=dict)
+        primitives: dict[str, PrimitiveConfig] = field(default_factory=dict)
         transitions: list[Transition] = field(default_factory=list)
         fps: int = 10
         robot: Any = None
@@ -183,6 +208,7 @@ TRANSITION_TYPES: dict[str, type[Transition]] = {
     "on_success": OnSuccess,
     "on_observation_threshold": OnObservationThreshold,
     "on_time_limit": OnTimeLimit,
+    "on_target_pose_reached": OnTargetPoseReached,
     "reward_classifier": RewardClassifierTransition,
 }
 TRANSITION_TYPE_NAMES = {cls: name for name, cls in TRANSITION_TYPES.items()}
@@ -272,25 +298,62 @@ def _decode_transition(payload: dict[str, Any]) -> Transition:
     return transition_cls(**payload)
 
 
-def _encode_primitive(primitive: ManipulationPrimitiveConfig) -> dict[str, Any]:
+def _primitive_type_name(primitive: PrimitiveConfig) -> str:
+    if isinstance(primitive, OpenLoopTrajectoryPrimitiveConfig):
+        return "open_loop_trajectory"
+    if isinstance(primitive, MoveDeltaPrimitiveConfig):
+        return "move_delta"
+    return "static"
+
+
+def _encode_primitive(primitive: PrimitiveConfig) -> dict[str, Any]:
+    """Serialize one primitive config into a JSON-friendly payload.
+
+    Args:
+        primitive: Primitive config instance to serialize.
+
+    Returns:
+        A plain dictionary containing the primitive type tag, task-frame data,
+        and any subtype-specific configuration fields.
+    """
     if isinstance(primitive.task_frame, dict):
         task_frame = {name: _encode_task_frame(frame) for name, frame in primitive.task_frame.items()}
     else:
         task_frame = _encode_task_frame(primitive.task_frame)
     payload = {
+        "type": _primitive_type_name(primitive),
         "task_frame": task_frame,
         "policy_overwrites": primitive.policy_overwrites,
         "notes": primitive.notes,
         "is_terminal": primitive.is_terminal,
+        "target_pose_info_key": getattr(primitive, "target_pose_info_key", None),
     }
     if primitive.policy is not None and primitive.policy.pretrained_path is not None:
         payload["policy"] = {"pretrained_path": str(primitive.policy.pretrained_path), "device": getattr(primitive.policy, "device", "cpu")}
     if getattr(primitive, "processor", None):
         payload["processor"] = primitive.processor
+    if isinstance(primitive, MoveDeltaPrimitiveConfig):
+        payload["delta"] = primitive.delta
+        payload["delta_frame"] = primitive.delta_frame
+        payload["publish_target_info"] = primitive.publish_target_info
+    if isinstance(primitive, OpenLoopTrajectoryPrimitiveConfig):
+        payload["duration_substeps"] = primitive.duration_substeps
+        payload["substeps_per_step"] = primitive.substeps_per_step
+        payload["controller_hz"] = primitive.controller_hz
+        payload["substep_dt_s"] = primitive.substep_dt_s
+        payload["interruption_policy"] = primitive.interruption_policy
     return payload
 
 
-def _decode_primitive(payload: dict[str, Any]) -> ManipulationPrimitiveConfig:
+def _decode_primitive(payload: dict[str, Any]) -> PrimitiveConfig:
+    """Deserialize one primitive config from a JSON-friendly payload.
+
+    Args:
+        payload: Plain dictionary previously produced by ``_encode_primitive``.
+
+    Returns:
+        The reconstructed primitive config instance.
+    """
     raw_task_frame = payload.get("task_frame", {})
     if isinstance(raw_task_frame, dict) and "target" not in raw_task_frame:
         task_frame = {name: _decode_task_frame(frame_payload) for name, frame_payload in raw_task_frame.items()}
@@ -300,14 +363,39 @@ def _decode_primitive(payload: dict[str, Any]) -> ManipulationPrimitiveConfig:
     policy = None
     if isinstance(policy_payload, dict) and policy_payload.get("pretrained_path"):
         policy = PreTrainedConfig(pretrained_path=Path(policy_payload["pretrained_path"]), device=policy_payload.get("device", "cpu"))
-    return ManipulationPrimitiveConfig(
-        task_frame=task_frame,
-        processor=payload.get("processor", {}),
-        policy=policy,
-        policy_overwrites=payload.get("policy_overwrites", {}),
-        notes=payload.get("notes"),
-        is_terminal=payload.get("is_terminal", False),
-    )
+    primitive_type = payload.get("type", "static")
+    primitive_cls: type[PrimitiveConfig]
+    if primitive_type == "move_delta":
+        primitive_cls = MoveDeltaPrimitiveConfig
+    elif primitive_type == "open_loop_trajectory":
+        primitive_cls = OpenLoopTrajectoryPrimitiveConfig
+    else:
+        primitive_cls = ManipulationPrimitiveConfig
+
+    kwargs: dict[str, Any] = {
+        "task_frame": task_frame,
+        "processor": payload.get("processor", {}),
+        "policy": policy,
+        "policy_overwrites": payload.get("policy_overwrites", {}),
+        "notes": payload.get("notes"),
+        "is_terminal": payload.get("is_terminal", False),
+        "target_pose_info_key": payload.get("target_pose_info_key"),
+    }
+    if issubclass(primitive_cls, MoveDeltaPrimitiveConfig):
+        kwargs.update(
+            delta=payload.get("delta", [0.0] * 6),
+            delta_frame=payload.get("delta_frame", "world"),
+            publish_target_info=payload.get("publish_target_info", True),
+        )
+    if issubclass(primitive_cls, OpenLoopTrajectoryPrimitiveConfig):
+        kwargs.update(
+            duration_substeps=payload.get("duration_substeps", 10),
+            substeps_per_step=payload.get("substeps_per_step", 1),
+            controller_hz=payload.get("controller_hz"),
+            substep_dt_s=payload.get("substep_dt_s"),
+            interruption_policy=payload.get("interruption_policy", "stop_on_events"),
+        )
+    return primitive_cls(**kwargs)
 
 
 def _encode_mpnet(config: ManipulationPrimitiveNetConfig) -> dict[str, Any]:
@@ -336,7 +424,7 @@ def _validate_task_frame(frame: TaskFrame) -> None:
     frame.__post_init__()
 
 
-def _validate_primitive(primitive: ManipulationPrimitiveConfig) -> None:
+def _validate_primitive(primitive: PrimitiveConfig) -> None:
     primitive.__post_init__()
     task_frames = primitive.task_frame.values() if isinstance(primitive.task_frame, dict) else [primitive.task_frame]
     for frame in task_frames:
@@ -403,6 +491,103 @@ def summarize_mpnet(config: ManipulationPrimitiveNetConfig) -> dict[str, Any]:
     }
 
 
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return str(value)
+
+
+def _transition_condition_summary(transition: Transition) -> str:
+    transition_type = TRANSITION_TYPE_NAMES.get(type(transition), type(transition).__name__)
+    if transition_type == "always":
+        return "always"
+    if transition_type == "on_success":
+        success_key = getattr(transition, "success_key", "success")
+        return f"info.{success_key} == True"
+    if transition_type == "on_observation_threshold":
+        return (
+            f"obs.{getattr(transition, 'obs_key', '')} "
+            f"{getattr(transition, 'operator', 'ge')} {getattr(transition, 'threshold', 0.0)}"
+        )
+    if transition_type == "on_time_limit":
+        return (
+            f"info.{getattr(transition, 'step_key', 'step')} "
+            f">= {getattr(transition, 'max_steps', 0)}"
+        )
+    if transition_type == "on_target_pose_reached":
+        robot = getattr(transition, "robot_name", None) or "*"
+        axes = getattr(transition, "axes", None) or list(TASK_FRAME_AXIS_NAMES)
+        return f"target pose reached robot={robot} axes={list(axes)} tol={getattr(transition, 'tolerance', 0.0)}"
+    if transition_type == "reward_classifier":
+        return (
+            f"{getattr(transition, 'metric_key', 'success')} "
+            f"{getattr(transition, 'operator', 'ge')} {getattr(transition, 'threshold', 0.0)}"
+        )
+    return transition_type
+
+
+def summarize_mpnet_debug(config: ManipulationPrimitiveNetConfig) -> dict[str, Any]:
+    """Return a concise, debug-oriented summary of an MP-Net graph."""
+    summary = summarize_mpnet(config)
+    primitives = []
+    for primitive in summary["primitives"]:
+        primitives.append(
+            {
+                "name": primitive["name"],
+                "type": _primitive_type_name(config.primitives[primitive["name"]]),
+                "roles": {
+                    "is_start": primitive["name"] == config.start_primitive,
+                    "is_reset": primitive["name"] == config.reset_primitive,
+                    "is_terminal": primitive["is_terminal"],
+                },
+                "notes": primitive["notes"],
+                "has_policy": primitive["has_policy"],
+                "policy_path": primitive["policy_path"],
+                "task_frames": primitive["task_frames"],
+            }
+        )
+
+    transitions = []
+    for index, transition in enumerate(config.transitions):
+        details = {
+            key: value
+            for key, value in vars(transition).items()
+            if key not in {"source", "target"}
+        }
+        transitions.append(
+            {
+                "index": index,
+                "type": TRANSITION_TYPE_NAMES.get(type(transition), type(transition).__name__),
+                "source": transition.source,
+                "target": transition.target,
+                "reason": getattr(transition, "reason", None),
+                "condition_summary": _transition_condition_summary(transition),
+                "parameters": _jsonable(details),
+            }
+        )
+
+    return {
+        "start_primitive": config.start_primitive,
+        "reset_primitive": config.reset_primitive,
+        "fps": config.fps,
+        "primitive_count": len(primitives),
+        "transition_count": len(transitions),
+        "primitives": primitives,
+        "transitions": transitions,
+    }
+
+
 def list_primitives(config: ManipulationPrimitiveNetConfig) -> list[dict[str, Any]]:
     """List primitive summaries only."""
     return summarize_mpnet(config)["primitives"]
@@ -413,13 +598,13 @@ def describe_transitions(config: ManipulationPrimitiveNetConfig) -> list[dict[st
     return summarize_mpnet(config)["transitions"]
 
 
-def _primitive_task_frames(primitive: ManipulationPrimitiveConfig) -> dict[str, TaskFrame]:
+def _primitive_task_frames(primitive: PrimitiveConfig) -> dict[str, TaskFrame]:
     if isinstance(primitive.task_frame, dict):
         return primitive.task_frame
     return {"default": primitive.task_frame}
 
 
-def _resolve_frame(primitive: ManipulationPrimitiveConfig, robot_name: str | None = None) -> tuple[str, TaskFrame]:
+def _resolve_frame(primitive: PrimitiveConfig, robot_name: str | None = None) -> tuple[str, TaskFrame]:
     task_frames = _primitive_task_frames(primitive)
     if robot_name is not None:
         if robot_name not in task_frames:

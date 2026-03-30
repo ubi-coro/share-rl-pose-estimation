@@ -8,6 +8,7 @@ from lerobot.configs.default import DatasetConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.envs import EnvConfig
+from share.debug.mpnet_debug import MPNetDebugConfig
 from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
 
 
@@ -78,6 +79,7 @@ class DatasetRecordConfig(draccus.ChoiceRegistry, DatasetConfig):
 class RecordConfig:
     env: ManipulationPrimitiveNetConfig
     dataset: DatasetRecordConfig | None = None
+    debug: MPNetDebugConfig | None = None
     # Whether to control the robot with a policy
     policy: PreTrainedConfig | None = None
     # Display all cameras on screen

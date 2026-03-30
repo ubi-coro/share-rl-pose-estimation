@@ -40,6 +40,9 @@ class DummyEnv:
         self.reset_calls.append({"seed": seed, "options": dict(options or {})})
         return self.obs, {"reset_seed": seed}
 
+    def reset_runtime_state(self):
+        return None
+
 
 class IdentityProcessor:
     """Processor stub that keeps transitions unchanged while tracking resets."""
@@ -91,6 +94,7 @@ def _primitive(*, is_terminal: bool = False, policy=None):
         is_terminal=is_terminal,
         policy=policy,
         features={ACTION: SimpleNamespace(shape=(1,))},
+        on_entry=lambda _env, _entry_context: None,
     )
 
 

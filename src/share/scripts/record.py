@@ -28,6 +28,7 @@ from lerobot.utils.utils import (
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
 
 from share.configs.record import RecordConfig
+from share.debug.mpnet_debug import MPNetDebugger
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
 from share.utils.control_utils import make_policies_and_datasets
 from share.utils.video_utils import MultiVideoEncodingManager
@@ -72,9 +73,12 @@ def record_loop(
     postprocessors: dict[str, PolicyProcessorPipeline[PolicyAction, PolicyAction]],
     display_data: bool = False,
     display_compressed_images: bool = False,
-    interactive: bool = False
+    interactive: bool = False,
+    debugger: MPNetDebugger | None = None,
 ):
     transition = mp_net.reset()
+    if debugger is not None:
+        debugger.log_reset(mp_net, transition)
 
     # check if we need to terminate early
     info = transition.get(TransitionKey.INFO, {})
@@ -111,6 +115,8 @@ def record_loop(
 
         # (2) Step environment
         new_transition = mp_net.step(action)
+        if debugger is not None:
+            debugger.log_step(mp_net, new_transition)
 
         action = new_transition[TransitionKey.ACTION]
         reward = new_transition[TransitionKey.REWARD]
@@ -183,43 +189,55 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     # make
     mp_net = ManipulationPrimitiveNet(cfg.env)
+    debugger = MPNetDebugger.start(
+        cfg.debug,
+        cfg.env,
+        display_ip=cfg.display_ip,
+        display_port=cfg.display_port,
+        dataset_root=Path(cfg.dataset.root) if cfg.dataset is not None and cfg.dataset.root is not None else None,
+        reuse_existing_rerun=cfg.display_data,
+        session_name="recording-mpnet-debug",
+    )
     datasets, policies, preprocessors, postprocessors = make_policies_and_datasets(cfg)
 
-    with MultiVideoEncodingManager(datasets):
-        while True:
-            log_say(f"Record episode for {mp_net.active_primitive}", play_sounds=cfg.play_sounds)
+    try:
+        with MultiVideoEncodingManager(datasets):
+            while True:
+                log_say(f"Record episode for {mp_net.active_primitive}", play_sounds=cfg.play_sounds)
 
-            dataset = datasets.get(mp_net.active_primitive, None)
+                dataset = datasets.get(mp_net.active_primitive, None)
 
-            info = record_loop(
-                mp_net=mp_net,
-                datasets=datasets,
-                policies=policies,
-                preprocessors=preprocessors,
-                postprocessors=postprocessors,
-                display_data=cfg.display_data,
-                display_compressed_images=display_compressed_images,
-                interactive=cfg.interactive,
-            )
+                info = record_loop(
+                    mp_net=mp_net,
+                    datasets=datasets,
+                    policies=policies,
+                    preprocessors=preprocessors,
+                    postprocessors=postprocessors,
+                    display_data=cfg.display_data,
+                    display_compressed_images=display_compressed_images,
+                    interactive=cfg.interactive,
+                    debugger=debugger,
+                )
 
-            if info.get(TeleopEvents.STOP_RECORDING, False):
-                break
+                if info.get(TeleopEvents.STOP_RECORDING, False):
+                    break
 
-            if dataset is None:
-                continue
+                if dataset is None:
+                    continue
 
-            # dataset ops, saving / clearing episode buffers
-            if info.get(TeleopEvents.RERECORD_EPISODE, False):
-                log_say("Re-record episode", cfg.play_sounds, blocking=True)
-                dataset.clear_episode_buffer()
-            elif dataset.episode_buffer["size"] > 0:
-                log_say("Save episode", cfg.play_sounds, blocking=False)
-                dataset.save_episode()
-            else:
-                log_say("Dataset is empty, continue execution", cfg.play_sounds, blocking=True)
-
-    log_say("Stop recording", cfg.play_sounds, blocking=True)
-    mp_net.close()
+                # dataset ops, saving / clearing episode buffers
+                if info.get(TeleopEvents.RERECORD_EPISODE, False):
+                    log_say("Re-record episode", cfg.play_sounds, blocking=True)
+                    dataset.clear_episode_buffer()
+                elif dataset.episode_buffer["size"] > 0:
+                    log_say("Save episode", cfg.play_sounds, blocking=False)
+                    dataset.save_episode()
+                else:
+                    log_say("Dataset is empty, continue execution", cfg.play_sounds, blocking=True)
+    finally:
+        debugger.close()
+        log_say("Stop recording", cfg.play_sounds, blocking=True)
+        mp_net.close()
 
 
 if __name__ == "__main__":

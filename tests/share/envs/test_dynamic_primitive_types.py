@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from types import SimpleNamespace
 
@@ -9,12 +10,14 @@ import pytest
 
 from lerobot.processor import TransitionKey
 
+from share.debug.mpnet_debug import MPNetDebugConfig, MPNetDebugger
 from share.envs.manipulation_primitive.config_manipulation_primitive import (
     MoveDeltaPrimitiveConfig,
     OpenLoopTrajectoryPrimitiveConfig,
     PrimitiveEntryContext,
     ManipulationPrimitiveConfig,
 )
+from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import ManipulationPrimitiveNetConfig
 from share.envs.manipulation_primitive.task_frame import ControlMode, PolicyMode, TaskFrame
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
 from share.envs.manipulation_primitive_net.transitions import OnTargetPoseReached
@@ -290,3 +293,86 @@ def test_static_primitive_publishes_target_pose_info_on_entry():
 
     assert env.target_pose["arm"] == pytest.approx([0.0] * 6)
     assert env._get_info()["primitive_target_pose"]["arm"] == pytest.approx([0.0] * 6)
+
+
+def test_open_loop_trajectory_info_matches_debugger_target_visualization(tmp_path):
+    config = OpenLoopTrajectoryPrimitiveConfig(
+        task_frame={"arm": _task_frame()},
+        delta={"arm": [0.4, 0.0, 0.0, 0.0, 0.0, 0.0]},
+        duration_substeps=4,
+        substeps_per_step=2,
+    )
+    config.validate(
+        robot_dict={"arm": MockRobot(name="arm", is_task_frame=True)},
+        teleop_dict={"arm": MockTeleoperator(name="arm", is_delta=True)},
+    )
+
+    env, _, _ = config.make(
+        robot_dict={"arm": MockRobot(name="arm", is_task_frame=True)},
+        teleop_dict={"arm": MockTeleoperator(name="arm", is_delta=True)},
+        cameras={},
+    )
+    env.robot_dict["arm"].get_observation = lambda: {
+        "x.ee_pos": 0.0,
+        "y.ee_pos": 0.0,
+        "z.ee_pos": 0.0,
+        "rx.ee_pos": 0.0,
+        "ry.ee_pos": 0.0,
+        "rz.ee_pos": 0.0,
+    }
+    config.on_entry(
+        env,
+        PrimitiveEntryContext(
+            observation={
+                "arm.x.ee_pos": 0.0,
+                "arm.y.ee_pos": 0.0,
+                "arm.z.ee_pos": 0.0,
+                "arm.rx.ee_pos": 0.0,
+                "arm.ry.ee_pos": 0.0,
+                "arm.rz.ee_pos": 0.0,
+            },
+            task_frame_origin={"arm": [0.0] * 6},
+        ),
+    )
+
+    step = env.step({})
+    config.is_terminal = True
+    net_config = ManipulationPrimitiveNetConfig(
+        start_primitive="scripted",
+        reset_primitive="scripted",
+        primitives={"scripted": config},
+        transitions=[],
+    )
+    debugger = MPNetDebugger.start(
+        MPNetDebugConfig(
+            enabled=True,
+            live_rerun=False,
+            trace_path=tmp_path / "trace.jsonl",
+            flush_interval_s=0.01,
+        ),
+        net_config,
+    )
+    debugger.log_step(
+        SimpleNamespace(active_primitive="scripted", config=net_config),
+        {
+            TransitionKey.OBSERVATION: step[0],
+            TransitionKey.INFO: {
+                **step[4],
+                "primitive_step": 1,
+                "episode_step": 1,
+                "transition_from": "scripted",
+                "transition_to": "scripted",
+                "transition_reason": None,
+            },
+        },
+    )
+    debugger.close()
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    step_event = next(event for event in events if event["kind"] == "step")
+    assert step_event["trajectory_progress"] == pytest.approx(0.5)
+    assert step_event["robots"]["arm"]["target_pose"][0] == pytest.approx(0.4)
