@@ -27,7 +27,7 @@ tilt_cfg = MoveDeltaPrimitiveConfig(
     notes="Rotate around the wrist in current-EE coordinates to begin pouring.",
     task_frame={"arm": TaskFrame(target=[0.0, 0.0, 0.20, 0.0, 0.0, 0.0], control_mode=[ControlMode.POS] * 6)},
     delta={"arm": [0.00, 0.00, -0.02, 0.0, 0.35, 0.0]},
-    delta_frame={"arm": "ee_current"},
+    delta_frame={"arm": "ee"},
 )
 
 pour_arc_cfg = OpenLoopTrajectoryPrimitiveConfig(

@@ -171,7 +171,7 @@ def test_move_delta_primitive_resolves_world_target_on_entry():
 
 
 def test_move_delta_primitive_resolves_ee_relative_translation_on_entry():
-    config = _validated_move_delta([0.1, 0.0, 0.0, 0.0, 0.0, 0.0], delta_frame="ee_current")
+    config = _validated_move_delta([0.1, 0.0, 0.0, 0.0, 0.0, 0.0], delta_frame="ee")
     env = DummyPrimitiveEnv({})
 
     config.on_entry(
@@ -194,7 +194,7 @@ def test_move_delta_primitive_resolves_ee_relative_translation_on_entry():
 
 
 def test_move_delta_uses_processed_pose_channels_when_relative_view_is_present():
-    config = _validated_move_delta([0.1, 0.0, 0.0, 0.0, 0.0, 0.0], delta_frame="ee_current", origin=[0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
+    config = _validated_move_delta([0.1, 0.0, 0.0, 0.0, 0.0, 0.0], delta_frame="ee", origin=[0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
     env = DummyPrimitiveEnv({})
 
     config.on_entry(

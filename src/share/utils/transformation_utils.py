@@ -3,7 +3,7 @@ from typing import Any
 from scipy.spatial.transform import Rotation
 
 from share.envs.manipulation_primitive.task_frame import TASK_FRAME_AXIS_NAMES
-
+from share.utils.constants import DEFAULT_ROBOT_NAME
 
 ROTATION_AXIS_ALIASES: dict[str, tuple[str, str]] = {
     "rx": ("rx", "wx"),
@@ -100,19 +100,27 @@ def compose_delta_pose(
         start_pose_world: Absolute 6D world pose used as the delta reference.
         delta: 6D Cartesian delta to apply.
         frame_name: Delta frame selector. ``"world"`` applies the delta
-            directly; ``"ee_current"`` rotates the translational component by
+            directly; ``"ee"`` rotates the translational component by
             the current EE orientation before composing it.
 
     Returns:
         The resolved target pose in world coordinates.
     """
-    if frame_name == "world":
-        return [float(start_pose_world[i] + delta[i]) for i in range(6)]
-    if frame_name != "ee_current":
-        raise ValueError(f"Unsupported delta frame '{frame_name}'.")
-
     start_rot = rotation_from_extrinsic_xyz(*start_pose_world[3:6])
     delta_rot = rotation_from_extrinsic_xyz(*delta[3:6])
+
+    if frame_name == "world":
+        target_rot = delta_rot * start_rot
+        return [
+            float(start_pose_world[0] + delta[0]),
+            float(start_pose_world[1] + delta[1]),
+            float(start_pose_world[2] + delta[2]),
+            *[float(v) for v in euler_xyz_from_rotation(target_rot)],
+        ]
+
+    if frame_name != "ee":
+        raise ValueError(f"Unsupported delta frame '{frame_name}'.")
+
     translated = start_rot.apply(delta[:3]).tolist()
     target_rot = start_rot * delta_rot
     return [
@@ -141,7 +149,7 @@ def rotation_component_keys(frame: "TaskFrame", absolute_rot_axes: list[int]) ->
     return []
 
 
-def get_robot_pose_from_observation(observation: dict[str, Any], robot_name: str) -> list[float]:
+def get_robot_pose_from_observation(observation: dict[str, Any], robot_name: str | None = None) -> list[float]:
     """Fetch one robot EE pose from processed observation channels.
 
     Args:
@@ -166,6 +174,9 @@ def get_robot_pose_from_observation(observation: dict[str, Any], robot_name: str
         if hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
             return float(list(value)[0])
         return float(value)
+
+    if robot_name is None:
+        robot_name = DEFAULT_ROBOT_NAME
 
     position: list[float] = []
     raw_rotvec: list[float] = []

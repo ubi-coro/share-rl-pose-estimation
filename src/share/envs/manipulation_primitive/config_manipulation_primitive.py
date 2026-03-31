@@ -107,7 +107,7 @@ class ObservationConfig:
     ee_wrench_axes: list[str] | dict[str, list[str]] | None = field(default_factory=lambda: [f"{ax}.ee_wrench" for ax in TASK_FRAME_AXIS_NAMES])
 
     stack_frames: int | dict[str, int] = 0
-    relative_ee_pos: bool | dict[str, bool] = True
+    relative_ee_pos: bool | dict[str, bool] = False
 
 
 @dataclass
@@ -164,7 +164,7 @@ class OpenLoopTrajectorySpec:
 
     target: list[float] | dict[str, list[float]] | None = None
     delta: list[float] | dict[str, list[float]] | None = None
-    frame: Literal["task", "world", "ee_current"] | dict[str, Literal["task", "world", "ee_current"]] = "task"
+    frame: Literal["task", "world", "ee"] | dict[str, Literal["task", "world", "ee_current"]] = "task"
     duration_s: float | dict[str, float] = 1.0
 
 
@@ -611,13 +611,14 @@ class ManipulationPrimitiveConfig(EnvConfig, ChoiceRegistry):
             target_pose[name] = [float(v) for v in frame.target]
         return start_pose, target_pose
 
+
 @ManipulationPrimitiveConfig.register_subclass("move_delta")
 @dataclass
 class MoveDeltaPrimitiveConfig(ManipulationPrimitiveConfig):
     """Primitive that resolves fixed task-space position axes from an entry-time delta."""
 
     delta: list[float] | dict[str, list[float]] = field(default_factory=lambda: [0.0] * 6)
-    delta_frame: Literal["world", "ee_current"] | dict[str, Literal["world", "ee_current"]] = "world"
+    delta_frame: Literal["world", "ee"] | dict[str, Literal["world", "ee_current"]] = "world"
     publish_target_info: bool | dict[str, bool] = True
 
     def validate(self, robot_dict, teleop_dict):
@@ -668,6 +669,9 @@ class MoveDeltaPrimitiveConfig(ManipulationPrimitiveConfig):
             Fixed ``POS`` axes resolve from ``entry_pose + delta``; learnable
             and non-``POS`` axes keep their configured targets.
         """
+
+        # start pose (last obs from the previous primitive)
+        # and target pose (what is currently in in the current task frame
         start_pose, target_pose = super().resolve_targets(entry_context)
         for name, frame in self.task_frame.items():
             start_world = task_pose_to_world_pose(start_pose[name], frame.origin)
@@ -691,6 +695,7 @@ class MoveDeltaPrimitiveConfig(ManipulationPrimitiveConfig):
                     )
                     continue
                 target_pose[name][axis] = float(resolved_target[axis])
+
         return start_pose, target_pose
 
     @staticmethod
@@ -771,8 +776,8 @@ class OpenLoopTrajectoryPrimitiveConfig(ManipulationPrimitiveConfig):
             if self.trajectory.delta is not None:
                 if len(self.trajectory.delta[name]) != 6:
                     raise ValueError(f"open_loop_trajectory delta for '{name}' must be a 6-vector.")
-                if self.trajectory.frame[name] not in {"world", "ee_current"}:
-                    raise ValueError("trajectory.delta requires trajectory.frame in {'world', 'ee_current'}.")
+                if self.trajectory.frame[name] not in {"world", "ee"}:
+                    raise ValueError("trajectory.delta requires trajectory.frame in {'world', 'ee'}.")
 
     def make(
         self,

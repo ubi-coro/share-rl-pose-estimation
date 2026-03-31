@@ -34,7 +34,7 @@ lean_in_cfg = MoveDeltaPrimitiveConfig(
     notes="Lean in using current-EE coordinates as if peeking between books.",
     task_frame={"arm": TaskFrame(target=[0.18, 0.00, 0.22, 0.0, 0.0, 0.0], control_mode=[ControlMode.POS] * 6)},
     delta={"arm": [0.00, 0.03, -0.04, 0.0, 0.0, 0.0]},
-    delta_frame={"arm": "ee_current"},
+    delta_frame={"arm": "ee"},
 )
 
 retreat_cfg = OpenLoopTrajectoryPrimitiveConfig(

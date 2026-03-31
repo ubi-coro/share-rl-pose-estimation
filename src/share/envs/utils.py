@@ -122,7 +122,7 @@ def resolve_entry_start_pose(
         frame: The task frame used by this primitive for that robot.
 
     Returns:
-        A 6D pose expressed in ``frame`` coordinates. Joint-space primitives
+        A 6D pose expressed as [xyzrpy] in ``frame`` coordinates. Joint-space primitives
         fall back to their static configured target.
     """
     if frame.space != ControlSpace.TASK:

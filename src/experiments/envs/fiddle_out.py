@@ -64,14 +64,12 @@ class EEFiddleOutCirclePrimitiveConfig(OpenLoopTrajectoryPrimitiveConfig):
 
     circle_radius_m: float | dict[str, float] = 0.005
     circle_frequency_hz: float | dict[str, float] = 2.0
-    lift_duration_s: float | dict[str, float] = 1.0
 
     def validate(self, robot_dict, teleop_dict):
         super().validate(robot_dict, teleop_dict)
         robot_names = list(robot_dict)
         self.circle_radius_m = copy_per_robot(self.circle_radius_m, robot_names)
         self.circle_frequency_hz = copy_per_robot(self.circle_frequency_hz, robot_names)
-        self.lift_duration_s = copy_per_robot(self.lift_duration_s, robot_names)
 
         if self.trajectory.delta is None:
             raise ValueError("ee_fiddle_out_circle requires trajectory.delta.")
@@ -79,8 +77,6 @@ class EEFiddleOutCirclePrimitiveConfig(OpenLoopTrajectoryPrimitiveConfig):
         for name in robot_names:
             radius = float(self.circle_radius_m[name])
             frequency_hz = float(self.circle_frequency_hz[name])
-            lift_duration_s = float(self.lift_duration_s[name])
-            total_duration_s = float(self.trajectory.duration_s[name])
             delta = [float(v) for v in self.trajectory.delta[name]]
             frame = self.trajectory.frame[name]
 
@@ -88,16 +84,10 @@ class EEFiddleOutCirclePrimitiveConfig(OpenLoopTrajectoryPrimitiveConfig):
                 raise ValueError("ee_fiddle_out_circle requires circle_radius_m >= 0.")
             if frequency_hz < 0.0:
                 raise ValueError("ee_fiddle_out_circle requires circle_frequency_hz >= 0.")
-            if lift_duration_s <= 0.0:
-                raise ValueError("ee_fiddle_out_circle requires lift_duration_s > 0.")
-            if total_duration_s < lift_duration_s:
-                raise ValueError("ee_fiddle_out_circle requires trajectory.duration_s >= lift_duration_s.")
-            if frame != "ee_current":
-                raise ValueError("ee_fiddle_out_circle requires trajectory.frame == 'ee_current'.")
+            if frame != "ee":
+                raise ValueError("ee_fiddle_out_circle requires trajectory.frame == 'ee'.")
             if any(abs(delta[axis]) > 1e-9 for axis in (0, 1, 3, 4, 5)):
                 raise ValueError("ee_fiddle_out_circle only supports a pure local-Z trajectory.delta.")
-            if delta[2] <= 0.0:
-                raise ValueError("ee_fiddle_out_circle requires a positive local-Z trajectory.delta.")
 
     def target_pose_at(
         self,
@@ -106,34 +96,14 @@ class EEFiddleOutCirclePrimitiveConfig(OpenLoopTrajectoryPrimitiveConfig):
         goal_pose: dict[str, list[float]],
     ) -> dict[str, list[float]]:
         alpha = max(0.0, float(alpha))
-        z_alpha = min(1.0, alpha)
         pose_by_robot: dict[str, list[float]] = {}
-        task_frames = self.task_frame if isinstance(self.task_frame, dict) else {
-            name: self.task_frame for name in start_pose
-        }
-        circle_radius = self.circle_radius_m if isinstance(self.circle_radius_m, dict) else {
-            name: self.circle_radius_m for name in start_pose
-        }
-        circle_frequency = self.circle_frequency_hz if isinstance(self.circle_frequency_hz, dict) else {
-            name: self.circle_frequency_hz for name in start_pose
-        }
-        trajectory_delta = self.trajectory.delta if isinstance(self.trajectory.delta, dict) else {
-            name: self.trajectory.delta for name in start_pose
-        }
-        trajectory_duration = self.trajectory.duration_s if isinstance(self.trajectory.duration_s, dict) else {
-            name: self.trajectory.duration_s for name in start_pose
-        }
-        lift_duration = self.lift_duration_s if isinstance(self.lift_duration_s, dict) else {
-            name: self.lift_duration_s for name in start_pose
-        }
-
-        for name, frame in task_frames.items():
+        for name, frame in self.task_frame.items():
             start_world = task_pose_to_world_pose(start_pose[name], frame.origin)
-            delta_z = float(trajectory_delta[name][2])
-            radius = float(circle_radius[name])
-            elapsed_s = alpha * float(trajectory_duration[name])
-            z_alpha = min(1.0, elapsed_s / float(lift_duration[name]))
-            theta = 2.0 * math.pi * float(circle_frequency[name]) * elapsed_s
+            delta_z = float(self.trajectory.delta[name][2])
+            radius = float(self.circle_radius_m[name])
+            elapsed_s = alpha * float(self.trajectory.duration_s[name])
+            z_alpha = min(1.0, elapsed_s / float(self.trajectory.duration_s[name]))
+            theta = 2.0 * math.pi * float(self.circle_frequency_hz[name]) * elapsed_s
             scripted_world = compose_delta_pose(
                 start_pose_world=start_world,
                 delta=[
@@ -144,7 +114,7 @@ class EEFiddleOutCirclePrimitiveConfig(OpenLoopTrajectoryPrimitiveConfig):
                     0.0,
                     0.0,
                 ],
-                frame_name="ee_current",
+                frame_name="ee",
             )
             pose_by_robot[name] = world_pose_to_task_pose(scripted_world, frame.origin)
 
@@ -161,10 +131,9 @@ class DemoUR3eTeleopFiddleOutEnvConfig(ManipulationPrimitiveNetConfig):
     reset_primitive: str = "teleop"
 
     fiddle_out_height_m: float = 0.02
-    fiddle_out_radius_m: float = 0.005
-    fiddle_out_circle_frequency_hz: float = 2.0
-    fiddle_out_lift_duration_s: float = 1.0
-    fiddle_out_duration_s: float = 3.0
+    fiddle_out_radius_m: float = 0.002
+    fiddle_out_circle_frequency_hz: float = 10.0
+    fiddle_out_duration_s: float = 1.0
     teleop_wrench_limits: list[float] = field(default_factory=lambda: [25.0, 25.0, 25.0, 1.0, 1.0, 1.0])
     fiddle_out_wrench_limits: list[float] = field(default_factory=lambda: [6.0, 6.0, 6.0, 0.4, 0.4, 0.4])
 
@@ -178,15 +147,13 @@ class DemoUR3eTeleopFiddleOutEnvConfig(ManipulationPrimitiveNetConfig):
             soft_real_time=True,
             rt_core=3,
             wrench_limits=list(self.teleop_wrench_limits),
-            compliance_reference_limit_enable=[False] * 6,
-            debug=True,
-            debug_axis=2,
+            compliance_reference_limit_enable=[True] * 6,
         )
         self.teleop = SpaceMouseConfig()
         self.teleop.action_scale = [0.05, 0.05, 0.2, 0.1, 0.1, 0.1]
-        self.cameras = {
-            "wrist": RealSenseCameraConfig(serial_number_or_name="323743071487"),
-        }
+        #self.cameras = {
+        #    "wrist": RealSenseCameraConfig(serial_number_or_name="323743071487")
+        #}
 
         teleop_primitive = ManipulationPrimitiveConfig(
             task_frame=TaskFrame(
@@ -208,13 +175,12 @@ class DemoUR3eTeleopFiddleOutEnvConfig(ManipulationPrimitiveNetConfig):
                 controller_overrides={"wrench_limits": list(self.fiddle_out_wrench_limits)},
             ),
             trajectory=OpenLoopTrajectorySpec(
-                delta=[0.0, 0.0, float(self.fiddle_out_height_m), 0.0, 0.0, 0.0],
-                frame="ee_current",
+                delta=[0.0, 0.0, -float(self.fiddle_out_height_m), 0.0, 0.0, 0.0],
+                frame="ee",
                 duration_s=float(self.fiddle_out_duration_s),
             ),
             circle_radius_m=float(self.fiddle_out_radius_m),
             circle_frequency_hz=float(self.fiddle_out_circle_frequency_hz),
-            lift_duration_s=float(self.fiddle_out_lift_duration_s),
             processor=processor,
             notes=(
                 "Open-loop fiddle-out: ramp up in the current EE frame, keep orientation fixed, "
