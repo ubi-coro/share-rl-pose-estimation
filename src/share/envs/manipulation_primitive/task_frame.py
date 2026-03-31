@@ -33,14 +33,18 @@ TASK_FRAME_AXIS_NAMES = ["x", "y", "z", "rx", "ry", "rz"]
 
 @dataclass(slots=True)
 class TaskFrame:
-    """Serializable task-frame command shared by policy, processors, and robots."""
+    """Serializable task-frame command shared by policy, processors, and robots.
+
+    Task-space poses use ``[x, y, z, roll, pitch, yaw]`` where the rotational
+    entries are user-facing extrinsic XYZ Euler angles in radians.
+    """
     target: list[float] = field(default_factory=lambda: 6 * [0.0])
     space: ControlSpace = ControlSpace.TASK
     policy_mode: list[PolicyMode | None] = field(default_factory=lambda: 6 * [PolicyMode.RELATIVE])
     control_mode: list[ControlMode] = field(default_factory=lambda: 6 * [ControlMode.POS])
     origin: list[float] | None = None
-    min_pose: list[float] | None = None  # 6-vector: min xyz (m), min extrinsic euler (rad)
-    max_pose: list[float] | None = None  # 6-vector: max xyz (m), max extrinsic euler (rad)
+    min_pose: list[float] | None = None  # 6-vector: min xyz (m), min extrinsic XYZ Euler angles (rad)
+    max_pose: list[float] | None = None  # 6-vector: max xyz (m), max extrinsic XYZ Euler angles (rad)
     controller_overrides: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
@@ -67,7 +71,7 @@ class TaskFrame:
             if self.origin is None:
                 self.origin = 6 * [0.0]
             if len(self.origin) != 6:
-                raise ValueError("origin must be a 6 vector (xyz + rotation vector in rad)")
+                raise ValueError("origin must be a 6 vector (xyz + extrinsic XYZ Euler roll/pitch/yaw in rad)")
         elif self.origin is not None:
             raise ValueError("origin must be None when space == JOINT")
         

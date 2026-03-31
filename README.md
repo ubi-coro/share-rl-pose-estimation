@@ -89,6 +89,7 @@ pip install -e src/share/teleoperators/spacemouse
 The root package currently exposes:
 
 - `share-record`
+- `share-design-constraints`
 - `share-train`
 - `share-eval`
 
@@ -218,6 +219,10 @@ save_mpnet_config(config, "mpnets/template.json")
 ### Recording
 
 `share-record` runs an MP-Net environment, routes teleop/policy actions through the processor stack, and writes one dataset per adaptive primitive.
+
+### Constraint Design
+
+`share-design-constraints` runs an MP-Net as a live calibration routine and lets you edit adaptive primitive task frames in place. The intended workflow is to teleoperate an adaptive primitive, press `o` to set the current pose as the task-frame origin, move through the desired workspace, and let the tool accumulate `min_pose` / `max_pose` in that frame before saving the updated MP-Net JSON.
 
 At a high level it:
 
