@@ -4,6 +4,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 from pprint import pformat
+import sys
 from typing import Any
 
 import torch
@@ -106,6 +107,31 @@ class WorkspaceConstraintDesigner:
             poses[robot_name] = get_robot_pose_from_observation(observation, robot_name)
         return poses
 
+    def current_pose_in_frame_by_robot(self, primitive_name: str | None = None) -> dict[str, list[float]]:
+        if primitive_name is None:
+            primitive_name = self.mp_net.active_primitive
+        primitive = self.mp_net.config.primitives[primitive_name]
+        current_world = self.current_world_pose_by_robot(primitive_name)
+        return {
+            robot_name: world_pose_to_task_pose(current_world[robot_name], frame.origin)
+            for robot_name, frame in _task_frames_for_primitive(primitive).items()
+        }
+
+    def _reset_runtime_state_for_primitive(self, primitive_name: str) -> None:
+        env = self.mp_net._envs[primitive_name]
+        env_processor = getattr(self.mp_net, "_env_processors", {}).get(primitive_name)
+        action_processor = getattr(self.mp_net, "_action_processors", {}).get(primitive_name)
+        if env_processor is not None:
+            env_processor.reset()
+        if action_processor is not None:
+            action_processor.reset()
+        reset_runtime_state = getattr(env, "reset_runtime_state", None)
+        if callable(reset_runtime_state):
+            reset_runtime_state()
+        apply_task_frames = getattr(env, "apply_task_frames", None)
+        if callable(apply_task_frames):
+            apply_task_frames()
+
     def set_origin_from_current_pose(self, primitive_name: str | None = None) -> None:
         if primitive_name is None:
             primitive_name = self.mp_net.active_primitive
@@ -119,13 +145,15 @@ class WorkspaceConstraintDesigner:
         for robot_name, frame in _task_frames_for_primitive(primitive).items():
             origin = [float(v) for v in current_world[robot_name]]
             frame.origin = list(origin)
+            frame.target = [0.0] * len(frame.target)
             frame.min_pose = [0.0] * len(frame.target)
             frame.max_pose = [0.0] * len(frame.target)
             env.task_frame[robot_name].origin = list(origin)
+            env.task_frame[robot_name].target = [0.0] * len(frame.target)
             env.task_frame[robot_name].min_pose = [0.0] * len(frame.target)
             env.task_frame[robot_name].max_pose = [0.0] * len(frame.target)
 
-        env.apply_task_frames()
+        self._reset_runtime_state_for_primitive(primitive_name)
         self._tracked_primitives.add(primitive_name)
         logging.info("[%s] Set frame origin from current pose and reset bounds.", primitive_name)
         self.log_status(primitive_name)
@@ -147,7 +175,7 @@ class WorkspaceConstraintDesigner:
             env.task_frame[robot_name].min_pose = list(frame.min_pose)
             env.task_frame[robot_name].max_pose = list(frame.max_pose)
 
-        env.apply_task_frames()
+        self._reset_runtime_state_for_primitive(primitive_name)
         logging.info("[%s] Reset workspace bounds in the current frame.", primitive_name)
         self.log_status(primitive_name)
 
@@ -198,6 +226,17 @@ class WorkspaceConstraintDesigner:
         }
         logging.info("[%s] %s", primitive_name, pformat(summary))
 
+    def print_live_pose(self, primitive_name: str | None = None) -> None:
+        if primitive_name is None:
+            primitive_name = self.mp_net.active_primitive
+        pose_in_frame = self.current_pose_in_frame_by_robot(primitive_name)
+        compact = " | ".join(
+            f"{robot}: {[round(float(value), 4) for value in pose]}"
+            for robot, pose in pose_in_frame.items()
+        )
+        sys.stdout.write(f"\r[{primitive_name}] pose_in_frame {compact}   ")
+        sys.stdout.flush()
+
 
 def calibration_loop(
     mp_net: ManipulationPrimitiveNet,
@@ -232,6 +271,7 @@ def calibration_loop(
         previous_primitive = mp_net.active_primitive
         transition = mp_net.step(action)
         designer.update_bounds(previous_primitive)
+        designer.print_live_pose(previous_primitive)
 
         info = transition.get(TransitionKey.INFO, {})
         next_primitive = info.get("transition_to", previous_primitive)
