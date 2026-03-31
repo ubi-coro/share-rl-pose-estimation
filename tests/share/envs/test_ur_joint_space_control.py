@@ -123,6 +123,14 @@ class _Queue:
         self.items.append(item)
 
 
+def _batched_queue_dict(payload: dict) -> dict[str, np.ndarray]:
+    batched = {}
+    for key, value in payload.items():
+        array = np.asarray(value)
+        batched[key] = array[None] if array.ndim > 0 else np.asarray([array])
+    return batched
+
+
 class _ReadyController:
     def __init__(self):
         self.is_ready = True
@@ -149,6 +157,19 @@ def test_task_frame_command_joint_space_maps_joint_position_keys():
         "joint_5.pos": 0.5,
         "joint_6.pos": 0.6,
     }
+
+
+def test_task_frame_command_converts_origin_rpy_to_internal_rotvec():
+    controller_module = _load_controller_module()
+    command = controller_module.TaskFrameCommand(
+        origin=[0.0, 0.0, 0.0, 0.2, -0.1, 0.3],
+        control_mode=[ControlMode.POS] * 6,
+        policy_mode=[PolicyMode.ABSOLUTE] * 6,
+    )
+
+    queued = command.to_queue_dict()
+    expected_rotvec = controller_module.R.from_euler("xyz", [0.2, -0.1, 0.3], degrees=False).as_rotvec()
+    np.testing.assert_allclose(queued["origin"][3:6], expected_rotvec)
 
 
 def test_controller_rejects_task_to_joint_switches():
@@ -199,6 +220,47 @@ def test_controller_joint_impedance_uses_direct_torque_interface():
     rtde_c = DirectTorqueOnly()
     controller_module.RTDETaskFrameController._send_joint_torque(rtde_c, torque)
     assert rtde_c.calls == [(torque.tolist(), True)]
+
+
+def test_controller_reexpresses_virtual_target_when_task_frame_origin_changes():
+    controller_module = _load_controller_module()
+    controller = object.__new__(controller_module.RTDETaskFrameController)
+    controller._active_space = None
+    controller.origin = np.zeros(6, dtype=np.float64)
+    controller.control_mode = np.array([int(ControlMode.POS)] * 6, dtype=np.int64)
+    controller.delta_mode = np.array([int(PolicyMode.ABSOLUTE)] * 6, dtype=np.int64)
+    controller.force_on = True
+    controller._resolve_compliance_settings = lambda **kwargs: None
+    controller.read_current_state = lambda rtde_r: {"ActualTCPPose": np.zeros(6, dtype=np.float64)}
+    controller._enter_task_force_mode = lambda rtde_c: None
+
+    class _Receive:
+        @staticmethod
+        def getActualQ():
+            return [0.0] * 6
+
+    command = controller_module.TaskFrameCommand(
+        origin=[0.0, 0.0, 0.0, 0.0, 0.0, np.pi / 2.0],
+        target=[0.0] * 6,
+        control_mode=[ControlMode.POS] * 6,
+        policy_mode=[PolicyMode.ABSOLUTE] * 6,
+    )
+    msgs = _batched_queue_dict(command.to_queue_dict())
+
+    keep_running, active_space, x_cmd, _ = controller._apply_pending_commands(
+        msgs=msgs,
+        n_cmd=1,
+        rtde_c=object(),
+        rtde_r=_Receive(),
+        active_space=None,
+        x_cmd=np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float64),
+        q_cmd=np.zeros(6, dtype=np.float64),
+    )
+
+    assert keep_running is True
+    assert active_space == ControlSpace.TASK
+    np.testing.assert_allclose(x_cmd[:3], [0.0, -1.0, 0.0], atol=1e-6)
+    np.testing.assert_allclose(x_cmd[3:6], [0.0, 0.0, -np.pi / 2.0], atol=1e-6)
 
 
 def test_ur_wrapper_locks_joint_space_and_rejects_task_space_afterwards():

@@ -50,7 +50,7 @@ def _observation(x: float, y: float, z: float) -> dict[str, float]:
     }
 
 
-def test_set_origin_from_current_pose_resets_bounds(tmp_path):
+def test_set_origin_from_current_pose_resets_tracked_bounds_without_enforcing_them(tmp_path):
     primitive_frame = _adaptive_frame()
     env_frame = _adaptive_frame()
     primitive = ManipulationPrimitiveConfig(task_frame={"arm": primitive_frame})
@@ -58,15 +58,18 @@ def test_set_origin_from_current_pose_resets_bounds(tmp_path):
     designer = WorkspaceConstraintDesigner(_FakeMPNet(primitive, env), tmp_path / "mpnet.json")
 
     designer.set_origin_from_current_pose()
+    status = designer.status_summary("pick")
 
     assert primitive.task_frame["arm"].origin == pytest.approx([0.5, -0.2, 0.3, 0.0, 0.0, 0.0])
-    assert primitive.task_frame["arm"].min_pose == pytest.approx([0.0] * 6)
-    assert primitive.task_frame["arm"].max_pose == pytest.approx([0.0] * 6)
-    assert env.task_frame["arm"].origin == pytest.approx([0.5, -0.2, 0.3, 0.0, 0.0, 0.0])
+    assert primitive.task_frame["arm"].min_pose == [-float("inf")] * 6
+    assert primitive.task_frame["arm"].max_pose == [float("inf")] * 6
+    assert status["arm"]["tracked_min_pose"] == pytest.approx([0.0] * 6)
+    assert status["arm"]["tracked_max_pose"] == pytest.approx([0.0] * 6)
+    assert status["arm"]["live_bounds_enforced"] is False
     assert env.apply_calls == 1
 
 
-def test_update_bounds_tracks_pose_extrema_in_current_frame(tmp_path):
+def test_update_bounds_tracks_pose_extrema_without_live_enforcement(tmp_path):
     primitive = ManipulationPrimitiveConfig(task_frame={"arm": _adaptive_frame()})
     env = _FakeEnv(_observation(0.0, 0.0, 0.0), _adaptive_frame())
     designer = WorkspaceConstraintDesigner(_FakeMPNet(primitive, env), tmp_path / "mpnet.json")
@@ -77,6 +80,27 @@ def test_update_bounds_tracks_pose_extrema_in_current_frame(tmp_path):
     designer.update_bounds()
     env._observation = _observation(-0.4, 0.5, 0.1)
     designer.update_bounds()
+    status = designer.status_summary("pick")
 
-    assert primitive.task_frame["arm"].min_pose == pytest.approx([-0.4, -0.2, 0.0, 0.0, 0.0, 0.0])
-    assert primitive.task_frame["arm"].max_pose == pytest.approx([0.1, 0.5, 0.3, 0.0, 0.0, 0.0])
+    assert status["arm"]["tracked_min_pose"] == pytest.approx([-0.4, -0.2, 0.0, 0.0, 0.0, 0.0])
+    assert status["arm"]["tracked_max_pose"] == pytest.approx([0.1, 0.5, 0.3, 0.0, 0.0, 0.0])
+    assert primitive.task_frame["arm"].min_pose == [-float("inf")] * 6
+    assert primitive.task_frame["arm"].max_pose == [float("inf")] * 6
+
+
+def test_toggle_live_enforcement_applies_tracked_bounds_to_live_frame(tmp_path):
+    primitive = ManipulationPrimitiveConfig(task_frame={"arm": _adaptive_frame()})
+    env = _FakeEnv(_observation(0.0, 0.0, 0.0), _adaptive_frame())
+    designer = WorkspaceConstraintDesigner(_FakeMPNet(primitive, env), tmp_path / "mpnet.json")
+
+    designer.set_origin_from_current_pose()
+    env._observation = _observation(0.2, -0.1, 0.3)
+    designer.update_bounds()
+
+    designer.toggle_live_enforcement()
+    status = designer.status_summary("pick")
+
+    assert status["arm"]["live_bounds_enforced"] is True
+    assert primitive.task_frame["arm"].min_pose == pytest.approx([0.0, -0.1, 0.0, 0.0, 0.0, 0.0])
+    assert primitive.task_frame["arm"].max_pose == pytest.approx([0.2, 0.0, 0.3, 0.0, 0.0, 0.0])
+    assert env.apply_calls == 2

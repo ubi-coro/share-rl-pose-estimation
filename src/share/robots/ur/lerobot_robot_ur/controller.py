@@ -75,26 +75,16 @@ class TaskFrameCommand(TaskFrame):
             d["delta_mode"] = np.array([int(m) if m is not None else -1 for m in self.delta_mode])
             d["target"] = np.asarray(self.target).astype(np.float64)
             d["origin"] = np.asarray(self.origin).astype(np.float64)
-            #d["origin"][3:6] = R.from_euler("xyz", d["origin"][3:6], degrees=False).as_rotvec()
+            d["origin"][3:6] = R.from_euler("xyz", d["origin"][3:6], degrees=False).as_rotvec()
             d["max_pose"] = np.asarray(raw_overrides.get("max_pose", self.max_pose)).astype(np.float64)
             d["min_pose"] = np.asarray(raw_overrides.get("min_pose", self.min_pose)).astype(np.float64)
             d["kp"] = np.asarray(raw_overrides.get("kp", [2500.0, 2500.0, 2500.0, 150.0, 150.0, 150.0])).astype(np.float64)
             d["kd"] = np.asarray(raw_overrides.get("kd", [80.0, 80.0, 80.0, 8.0, 8.0, 8.0])).astype(np.float64)
-            d["wrench_limits"] = np.asarray(
-                raw_overrides.get("wrench_limits", [30.0, 30.0, 30.0, 3.0, 3.0, 3.0])
-            ).astype(np.float64)
-            d["compliance_adaptive_limit_enable"] = np.asarray(
-                raw_overrides.get("compliance_adaptive_limit_enable", [False] * 6)
-            ).astype(np.bool_)
-            d["compliance_reference_limit_enable"] = np.asarray(
-                raw_overrides.get("compliance_reference_limit_enable", [False] * 6)
-            ).astype(np.bool_)
-            d["compliance_desired_wrench"] = np.asarray(
-                raw_overrides.get("compliance_desired_wrench", [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])
-            ).astype(np.float64)
-            d["compliance_adaptive_limit_min"] = np.asarray(
-                raw_overrides.get("compliance_adaptive_limit_min", [0.1] * 6)
-            ).astype(np.float64)
+            d["wrench_limits"] = np.asarray(raw_overrides.get("wrench_limits", [30.0, 30.0, 30.0, 3.0, 3.0, 3.0])).astype(np.float64)
+            d["compliance_adaptive_limit_enable"] = np.asarray(raw_overrides.get("compliance_adaptive_limit_enable", [False] * 6)).astype(np.bool_)
+            d["compliance_reference_limit_enable"] = np.asarray(raw_overrides.get("compliance_reference_limit_enable", [False] * 6)).astype(np.bool_)
+            d["compliance_desired_wrench"] = np.asarray(raw_overrides.get("compliance_desired_wrench", [5.0, 5.0, 5.0, 0.5, 0.5, 0.5])).astype(np.float64)
+            d["compliance_adaptive_limit_min"] = np.asarray(raw_overrides.get("compliance_adaptive_limit_min", [0.1] * 6)).astype(np.float64)
         except Exception as e:
             raise ValueError(f"TaskFrameCommand seems to be missing fields: {e}")
         return d
@@ -408,6 +398,22 @@ class RTDETaskFrameController(mp.Process):
         except Empty:
             return None, 0
 
+    @classmethod
+    def _transform_task_pose_between_frames(
+        cls,
+        pose: np.ndarray,
+        source_origin: np.ndarray,
+        target_origin: np.ndarray,
+    ) -> np.ndarray:
+        """Re-express one internal task-frame pose in a different task frame."""
+        T_world_source = cls.sixvec_to_homogeneous(source_origin)
+        T_source_pose = cls.sixvec_to_homogeneous(pose)
+        T_world_pose = T_world_source @ T_source_pose
+
+        T_world_target = cls.sixvec_to_homogeneous(target_origin)
+        T_target_pose = np.linalg.inv(T_world_target) @ T_world_pose
+        return np.asarray(cls.homogenous_to_sixvec(T_target_pose), dtype=np.float64)
+
     def _apply_pending_commands(
         self,
         msgs: dict[str, np.ndarray] | None,
@@ -446,7 +452,16 @@ class RTDETaskFrameController(mp.Process):
                     "UR controller does not support switching between task-space and joint-space control"
                 )
 
-            self.origin = single["origin"].copy()
+            previous_origin = np.asarray(self.origin, dtype=np.float64).copy()
+            new_origin = np.asarray(single["origin"], dtype=np.float64).copy()
+            if new_space == ControlSpace.TASK and not np.allclose(previous_origin, new_origin):
+                x_cmd = self._transform_task_pose_between_frames(
+                    pose=x_cmd,
+                    source_origin=previous_origin,
+                    target_origin=new_origin,
+                )
+
+            self.origin = new_origin
             self.target = single["target"].copy()
             self.max_pose = single["max_pose"].copy()
             self.min_pose = single["min_pose"].copy()

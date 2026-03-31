@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from pprint import pformat
 import sys
@@ -24,10 +24,11 @@ init_logging()
 
 HOTKEY_HELP = (
     "Hotkeys: "
-    "[o] set origin from current pose and reset bounds, "
-    "[r] reset bounds in current frame, "
-    "[p] print current origin/bounds, "
-    "[s] save config, "
+    "[o] set origin from current pose and reset tracked bounds, "
+    "[r] reset tracked bounds at the current pose, "
+    "[e] toggle live enforcement of tracked bounds, "
+    "[p] print current origin/tracked bounds, "
+    "[s] save tracked bounds into the config, "
     "[q] save and quit"
 )
 
@@ -45,11 +46,15 @@ class HotkeyController:
     def __init__(self):
         from pynput import keyboard
 
-        self._counts = {name: 0 for name in ("set_origin", "reset_bounds", "print_status", "save", "quit")}
+        self._counts = {
+            name: 0
+            for name in ("set_origin", "reset_bounds", "toggle_enforcement", "print_status", "save", "quit")
+        }
         self._lock = threading.Lock()
         self._mapping = {
             "o": "set_origin",
             "r": "reset_bounds",
+            "e": "toggle_enforcement",
             "p": "print_status",
             "s": "save",
             "q": "quit",
@@ -88,13 +93,79 @@ def _task_frames_for_primitive(primitive: Any) -> dict[str, TaskFrame]:
     return {DEFAULT_ROBOT_NAME: primitive.task_frame}
 
 
+@dataclass(slots=True)
+class TrackedFrameBounds:
+    """Per-primitive bounds tracked by the calibration tool."""
+
+    origin: list[float] | None = None
+    min_pose: list[float] | None = None
+    max_pose: list[float] | None = None
+    enforce_live: bool = False
+
+
 class WorkspaceConstraintDesigner:
     """Track and persist per-primitive frame origins and workspace bounds."""
 
     def __init__(self, mp_net: ManipulationPrimitiveNet, output_path: Path):
         self.mp_net = mp_net
         self.output_path = Path(output_path)
-        self._tracked_primitives: set[str] = set()
+        self._tracked_bounds: dict[str, dict[str, TrackedFrameBounds]] = {}
+
+    def _tracked_record(
+        self,
+        primitive_name: str,
+        robot_name: str,
+        *,
+        create: bool = False,
+    ) -> TrackedFrameBounds | None:
+        records = self._tracked_bounds.get(primitive_name)
+        if records is None:
+            if not create:
+                return None
+            records = {}
+            self._tracked_bounds[primitive_name] = records
+
+        record = records.get(robot_name)
+        if record is None and create:
+            record = TrackedFrameBounds()
+            records[robot_name] = record
+        return record
+
+    @staticmethod
+    def _free_bounds(width: int) -> tuple[list[float], list[float]]:
+        return [float("-inf")] * width, [float("inf")] * width
+
+    def _apply_live_bounds(
+        self,
+        primitive_name: str,
+        *,
+        reapply_task_frame: bool = True,
+    ) -> None:
+        primitive = self.mp_net.config.primitives[primitive_name]
+        env = self.mp_net._envs[primitive_name]
+        for robot_name, frame in _task_frames_for_primitive(primitive).items():
+            env_frame = getattr(env, "task_frame", {}).get(robot_name, frame)
+            record = self._tracked_record(primitive_name, robot_name)
+            if (
+                record is not None
+                and record.enforce_live
+                and record.min_pose is not None
+                and record.max_pose is not None
+            ):
+                min_pose = [float(value) for value in record.min_pose]
+                max_pose = [float(value) for value in record.max_pose]
+            else:
+                min_pose, max_pose = self._free_bounds(len(frame.target))
+
+            frame.min_pose = list(min_pose)
+            frame.max_pose = list(max_pose)
+            env_frame.min_pose = list(min_pose)
+            env_frame.max_pose = list(max_pose)
+
+        if reapply_task_frame:
+            apply_task_frames = getattr(env, "apply_task_frames", None)
+            if callable(apply_task_frames):
+                apply_task_frames()
 
     def current_world_pose_by_robot(self, primitive_name: str | None = None) -> dict[str, list[float]]:
         if primitive_name is None:
@@ -136,94 +207,162 @@ class WorkspaceConstraintDesigner:
         if primitive_name is None:
             primitive_name = self.mp_net.active_primitive
         primitive = self.mp_net.config.primitives[primitive_name]
+        env = self.mp_net._envs[primitive_name]
         if not primitive.is_adaptive:
             logging.info("[%s] Ignoring origin set request because the primitive is not adaptive.", primitive_name)
             return
 
-        env = self.mp_net._envs[primitive_name]
         current_world = self.current_world_pose_by_robot(primitive_name)
         for robot_name, frame in _task_frames_for_primitive(primitive).items():
+            env_frame = getattr(env, "task_frame", {}).get(robot_name, frame)
             origin = [float(v) for v in current_world[robot_name]]
+            record = self._tracked_record(primitive_name, robot_name, create=True)
+            record.origin = list(origin)
+            record.min_pose = [0.0] * len(frame.target)
+            record.max_pose = [0.0] * len(frame.target)
             frame.origin = list(origin)
             frame.target = [0.0] * len(frame.target)
-            frame.min_pose = [0.0] * len(frame.target)
-            frame.max_pose = [0.0] * len(frame.target)
-            env.task_frame[robot_name].origin = list(origin)
-            env.task_frame[robot_name].target = [0.0] * len(frame.target)
-            env.task_frame[robot_name].min_pose = [0.0] * len(frame.target)
-            env.task_frame[robot_name].max_pose = [0.0] * len(frame.target)
+            env_frame.origin = list(origin)
+            env_frame.target = [0.0] * len(frame.target)
 
+        self._apply_live_bounds(primitive_name, reapply_task_frame=False)
         self._reset_runtime_state_for_primitive(primitive_name)
-        self._tracked_primitives.add(primitive_name)
-        logging.info("[%s] Set frame origin from current pose and reset bounds.", primitive_name)
+        logging.info("[%s] Set frame origin from current pose and reset tracked bounds.", primitive_name)
         self.log_status(primitive_name)
 
     def reset_bounds(self, primitive_name: str | None = None) -> None:
         if primitive_name is None:
             primitive_name = self.mp_net.active_primitive
         primitive = self.mp_net.config.primitives[primitive_name]
-        if primitive_name not in self._tracked_primitives:
+        reset_any = False
+        current_world = self.current_world_pose_by_robot(primitive_name)
+        for robot_name, frame in _task_frames_for_primitive(primitive).items():
+            record = self._tracked_record(primitive_name, robot_name)
+            if record is None or record.origin is None:
+                continue
+            current_in_frame = world_pose_to_task_pose(current_world[robot_name], record.origin)
+            record.min_pose = [float(v) for v in current_in_frame]
+            record.max_pose = [float(v) for v in current_in_frame]
+            reset_any = True
+
+        if not reset_any:
             logging.info("[%s] Bounds reset ignored because no origin has been set yet.", primitive_name)
             return
 
-        env = self.mp_net._envs[primitive_name]
-        current_world = self.current_world_pose_by_robot(primitive_name)
-        for robot_name, frame in _task_frames_for_primitive(primitive).items():
-            current_in_frame = world_pose_to_task_pose(current_world[robot_name], frame.origin)
-            frame.min_pose = [float(v) for v in current_in_frame]
-            frame.max_pose = [float(v) for v in current_in_frame]
-            env.task_frame[robot_name].min_pose = list(frame.min_pose)
-            env.task_frame[robot_name].max_pose = list(frame.max_pose)
-
-        self._reset_runtime_state_for_primitive(primitive_name)
-        logging.info("[%s] Reset workspace bounds in the current frame.", primitive_name)
+        self._apply_live_bounds(primitive_name)
+        logging.info("[%s] Reset tracked workspace bounds at the current pose.", primitive_name)
         self.log_status(primitive_name)
 
     def update_bounds(self, primitive_name: str | None = None) -> None:
         if primitive_name is None:
             primitive_name = self.mp_net.active_primitive
-        if primitive_name not in self._tracked_primitives:
-            return
 
         primitive = self.mp_net.config.primitives[primitive_name]
-        env = self.mp_net._envs[primitive_name]
         current_world = self.current_world_pose_by_robot(primitive_name)
         for robot_name, frame in _task_frames_for_primitive(primitive).items():
-            current_in_frame = world_pose_to_task_pose(current_world[robot_name], frame.origin)
-            if frame.min_pose is None or len(frame.min_pose) != len(current_in_frame):
-                frame.min_pose = [float(v) for v in current_in_frame]
+            record = self._tracked_record(primitive_name, robot_name)
+            if record is None or record.origin is None:
+                continue
+
+            current_in_frame = world_pose_to_task_pose(current_world[robot_name], record.origin)
+            if record.min_pose is None or len(record.min_pose) != len(current_in_frame):
+                record.min_pose = [float(v) for v in current_in_frame]
             else:
-                frame.min_pose = [
+                record.min_pose = [
                     min(float(lower), float(value))
-                    for lower, value in zip(frame.min_pose, current_in_frame, strict=True)
+                    for lower, value in zip(record.min_pose, current_in_frame, strict=True)
                 ]
-            if frame.max_pose is None or len(frame.max_pose) != len(current_in_frame):
-                frame.max_pose = [float(v) for v in current_in_frame]
+            if record.max_pose is None or len(record.max_pose) != len(current_in_frame):
+                record.max_pose = [float(v) for v in current_in_frame]
             else:
-                frame.max_pose = [
+                record.max_pose = [
                     max(float(upper), float(value))
-                    for upper, value in zip(frame.max_pose, current_in_frame, strict=True)
+                    for upper, value in zip(record.max_pose, current_in_frame, strict=True)
                 ]
 
-            env.task_frame[robot_name].min_pose = list(frame.min_pose)
-            env.task_frame[robot_name].max_pose = list(frame.max_pose)
+            if record.enforce_live:
+                env = self.mp_net._envs[primitive_name]
+                env_frame = getattr(env, "task_frame", {}).get(robot_name, frame)
+                frame.min_pose = [float(value) for value in record.min_pose]
+                frame.max_pose = [float(value) for value in record.max_pose]
+                env_frame.min_pose = [float(value) for value in record.min_pose]
+                env_frame.max_pose = [float(value) for value in record.max_pose]
+
+    def toggle_live_enforcement(self, primitive_name: str | None = None) -> None:
+        if primitive_name is None:
+            primitive_name = self.mp_net.active_primitive
+
+        primitive = self.mp_net.config.primitives[primitive_name]
+        tracked_records: list[TrackedFrameBounds] = []
+        for robot_name in _task_frames_for_primitive(primitive):
+            record = self._tracked_record(primitive_name, robot_name)
+            if record is not None and record.origin is not None:
+                tracked_records.append(record)
+
+        if not tracked_records:
+            logging.info("[%s] Live bound toggle ignored because no origin has been set yet.", primitive_name)
+            return
+
+        enable_live = not all(record.enforce_live for record in tracked_records)
+        for record in tracked_records:
+            record.enforce_live = enable_live
+
+        self._apply_live_bounds(primitive_name)
+        mode = "enabled" if enable_live else "disabled"
+        logging.info("[%s] Live enforcement of tracked bounds %s.", primitive_name, mode)
+        self.log_status(primitive_name)
 
     def save(self) -> None:
-        save_mpnet_config(self.mp_net.config, self.output_path)
-        logging.info("Saved calibrated MP-Net config to %s", self.output_path)
+        snapshots: dict[tuple[str, str], tuple[list[float], list[float]]] = {}
+        for primitive_name, primitive in self.mp_net.config.primitives.items():
+            for robot_name, frame in _task_frames_for_primitive(primitive).items():
+                snapshots[(primitive_name, robot_name)] = (list(frame.min_pose), list(frame.max_pose))
+
+        try:
+            for primitive_name, records in self._tracked_bounds.items():
+                primitive = self.mp_net.config.primitives[primitive_name]
+                frames = _task_frames_for_primitive(primitive)
+                for robot_name, record in records.items():
+                    frame = frames[robot_name]
+                    if record.origin is not None:
+                        frame.origin = [float(value) for value in record.origin]
+                    if record.min_pose is not None:
+                        frame.min_pose = [float(value) for value in record.min_pose]
+                    if record.max_pose is not None:
+                        frame.max_pose = [float(value) for value in record.max_pose]
+
+            save_mpnet_config(self.mp_net.config, self.output_path)
+            logging.info("Saved calibrated MP-Net config to %s", self.output_path)
+        finally:
+            for primitive_name, primitive in self.mp_net.config.primitives.items():
+                env = self.mp_net._envs[primitive_name]
+                for robot_name, frame in _task_frames_for_primitive(primitive).items():
+                    env_frame = getattr(env, "task_frame", {}).get(robot_name, frame)
+                    live_min_pose, live_max_pose = snapshots[(primitive_name, robot_name)]
+                    frame.min_pose = list(live_min_pose)
+                    frame.max_pose = list(live_max_pose)
+                    env_frame.min_pose = list(live_min_pose)
+                    env_frame.max_pose = list(live_max_pose)
+
+    def status_summary(self, primitive_name: str | None = None) -> dict[str, dict[str, Any]]:
+        if primitive_name is None:
+            primitive_name = self.mp_net.active_primitive
+        primitive = self.mp_net.config.primitives[primitive_name]
+        summary: dict[str, dict[str, Any]] = {}
+        for robot_name, frame in _task_frames_for_primitive(primitive).items():
+            record = self._tracked_record(primitive_name, robot_name)
+            summary[robot_name] = {
+                "origin": None if frame.origin is None else [float(value) for value in frame.origin],
+                "tracked_min_pose": None if record is None or record.min_pose is None else [float(value) for value in record.min_pose],
+                "tracked_max_pose": None if record is None or record.max_pose is None else [float(value) for value in record.max_pose],
+                "live_bounds_enforced": bool(record is not None and record.enforce_live),
+            }
+        return summary
 
     def log_status(self, primitive_name: str | None = None) -> None:
         if primitive_name is None:
             primitive_name = self.mp_net.active_primitive
-        primitive = self.mp_net.config.primitives[primitive_name]
-        summary = {
-            robot_name: {
-                "origin": frame.origin,
-                "min_pose": frame.min_pose,
-                "max_pose": frame.max_pose,
-            }
-            for robot_name, frame in _task_frames_for_primitive(primitive).items()
-        }
+        summary = self.status_summary(primitive_name)
         logging.info("[%s] %s", primitive_name, pformat(summary))
 
     def print_live_pose(self, primitive_name: str | None = None) -> None:
@@ -266,6 +405,9 @@ def calibration_loop(
 
         if hotkeys.consume("reset_bounds"):
             designer.reset_bounds()
+
+        if hotkeys.consume("toggle_enforcement"):
+            designer.toggle_live_enforcement()
 
         action = torch.zeros(mp_net.action_dim, dtype=torch.float32)
         previous_primitive = mp_net.active_primitive
