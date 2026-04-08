@@ -51,6 +51,7 @@ class Always(Transition):
 @dataclass
 class OnSuccess(Transition):
     success_key: str = TeleopEvents.SUCCESS
+    additional_reward: float = 1.0
 
     def evaluate(self, obs: dict[str, Any], info: dict[str, Any]) -> Outcome:
         return Outcome(

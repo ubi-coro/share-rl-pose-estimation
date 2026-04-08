@@ -1,5 +1,6 @@
 import logging
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Sequence, Tuple
@@ -193,3 +194,13 @@ class MPNetStepCounter:
     @property
     def global_step(self):
         return sum(self._count.values())
+
+
+@contextmanager
+def suppress_logging(level=logging.CRITICAL):
+    previous = logging.root.manager.disable
+    logging.disable(level)
+    try:
+        yield
+    finally:
+        logging.disable(previous)

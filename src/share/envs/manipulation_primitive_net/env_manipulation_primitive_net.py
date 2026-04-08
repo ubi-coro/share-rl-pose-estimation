@@ -30,7 +30,7 @@ class ManipulationPrimitiveNet(gym.Env):
         self.config = config
 
         # initialize hardware environments
-        robot_dict, teleop_dict, cameras = self.connect()
+        self.robot_dict, self.teleop_dict, self.cameras = self.connect()
 
         self._envs = {}
         self._env_processors = {}
@@ -38,7 +38,12 @@ class ManipulationPrimitiveNet(gym.Env):
         self._transitions: dict[str, list[Transition]] = {}
 
         for name, primitive in self.config.primitives.items():
-            env, env_processor, action_processor = primitive.make(robot_dict, teleop_dict, cameras, device=getattr(self.config, "device", "cpu"))
+            env, env_processor, action_processor = primitive.make(
+                self.robot_dict,
+                self.teleop_dict,
+                self.cameras,
+                device=getattr(self.config, "device", "cpu")
+            )
             self._envs[name] = env
             self._env_processors[name] = env_processor
             self._action_processors[name] = action_processor
@@ -136,6 +141,21 @@ class ManipulationPrimitiveNet(gym.Env):
             return transition
 
         return self._enter_active_primitive(seed=seed, options=options, entry_context=self._pending_entry_context)
+
+    def close(self):
+        for camera in self.cameras.values():
+            camera.disconnect()
+        for robot in self.robot_dict.values():
+            robot.disconnect()
+        for teleop in self.teleop_dict.values():
+            teleop.disconnect()
+
+        keys = list(self._envs.keys())
+        for k in keys:
+            self._envs[k].close()
+            del self._envs[k]
+            del self._action_processors[k]
+            del self._env_processors[k]
 
     def _step_env_and_check_transitions(self, action: torch.Tensor) -> EnvTransition:
         """Execute one primitive step and evaluate at most one transition edge.
