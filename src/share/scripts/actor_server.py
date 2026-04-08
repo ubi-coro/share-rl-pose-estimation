@@ -1,7 +1,4 @@
 #!/usr/bin/env python
-
-from __future__ import annotations
-
 import logging
 import os
 import time
@@ -12,6 +9,7 @@ from typing import Any
 
 import grpc
 import torch
+from lerobot.policies.sac.configuration_sac import SACConfig
 from torch.multiprocessing import Event, Queue
 
 from lerobot.configs import parser
@@ -19,7 +17,6 @@ from lerobot.processor import TransitionKey
 from lerobot.rl.process import ProcessSignalHandler
 from lerobot.transport import services_pb2, services_pb2_grpc
 from lerobot.transport.utils import (
-    bytes_to_state_dict,
     grpc_channel_options,
     python_object_to_bytes,
     receive_bytes_in_chunks,
@@ -31,16 +28,15 @@ from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.transition import Transition, move_transition_to_device
 from lerobot.utils.utils import get_safe_torch_device, init_logging
 
+from share.configs.rl import MPNetTrainRLServerPipelineConfig
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import (
     ManipulationPrimitiveNet,
 )
-from share.scripts.mpn_rl_runtime import (
-    MPNetTrainRLServerPipelineConfig,
+from share.rl.runtime import (
     PrimitiveBudgetCounter,
     apply_parameter_updates_from_queue,
     build_adaptive_registry,
-    filter_policy_observation,
-    make_policies_for_registry,
+    make_policies_for_registry, sanitize_local_grpc_proxy_env,
 )
 from share.teleoperators import TeleopEvents
 
@@ -67,6 +63,9 @@ def run_actor(cfg: MPNetTrainRLServerPipelineConfig, shutdown_event: Any | None 
         import torch.multiprocessing as mp
 
         mp.set_start_method("spawn")
+
+    # Initialize robot/env first, before any gRPC
+    mp_net = ManipulationPrimitiveNet(cfg.env)
 
     external_shutdown_event = shutdown_event
     if external_shutdown_event is None:
@@ -153,6 +152,7 @@ def run_actor(cfg: MPNetTrainRLServerPipelineConfig, shutdown_event: Any | None 
     try:
         result = act_with_policy(
             cfg=cfg,
+            env=mp_net,
             registry=registry,
             shutdown_event=runtime_shutdown_event,
             parameters_queue=parameters_queue,
@@ -179,6 +179,7 @@ def run_actor(cfg: MPNetTrainRLServerPipelineConfig, shutdown_event: Any | None 
 
 def act_with_policy(
     cfg: MPNetTrainRLServerPipelineConfig,
+    env: ManipulationPrimitiveNet,
     registry: Any,
     shutdown_event: Any,
     parameters_queue: Queue,
@@ -189,8 +190,7 @@ def act_with_policy(
 
     device = get_safe_torch_device(registry.actor_learner_policy_cfg.device, log=True)
 
-    mp_net = ManipulationPrimitiveNet(cfg.env)
-    policies = make_policies_for_registry(mp_net.config, registry, train_mode=False)
+    policies = make_policies_for_registry(env.config, registry, train_mode=False)
     step_counter = PrimitiveBudgetCounter(registry.online_step_budgets)
     applied_parameter_updates = 0
 
@@ -217,27 +217,29 @@ def act_with_policy(
             break
         time.sleep(0.01)
 
-    transition = mp_net.reset()
+    transition = env.reset()
     segment_state = reset_segment_state()
 
     try:
         while not step_counter.all_finished and not shutdown_event.is_set():
             step_start_t = time.perf_counter()
-            active_primitive = mp_net.active_primitive
+            active_primitive = env.active_primitive
             policy = policies.get(active_primitive)
             obs = transition[TransitionKey.OBSERVATION]
 
             consumed_updates = apply_parameter_updates_from_queue(
                 policies=policies,
                 parameters_queue=parameters_queue,
-                device=device,
+                device=str(device),
             )
             applied_parameter_updates += consumed_updates
 
             if policy is not None:
-                policy_obs = filter_policy_observation(obs, policy)
                 inference_t0 = time.perf_counter()
+
+                policy_obs = {key: value for key, value in obs.items() if key in policy.config.input_features}
                 action = policy.select_action(batch=policy_obs)
+
                 inference_dt = time.perf_counter() - inference_t0
                 segment_state["policy_inference_dts"].append(inference_dt)
                 policy_fps = 1.0 / (inference_dt + 1e-9)
@@ -250,9 +252,9 @@ def act_with_policy(
                         active_primitive,
                     )
             else:
-                action = torch.zeros((mp_net.action_dim,), dtype=torch.float32)
+                action = torch.zeros((env.action_dim,), dtype=torch.float32)
 
-            new_transition = mp_net.step(action)
+            new_transition = env.step(action)
             reward = float(new_transition[TransitionKey.REWARD])
             done = bool(new_transition.get(TransitionKey.DONE, False))
             truncated = bool(new_transition.get(TransitionKey.TRUNCATED, False))
@@ -268,7 +270,7 @@ def act_with_policy(
                     segment_state["intervention_steps"] += 1
 
                 next_obs = new_transition[TransitionKey.OBSERVATION]
-                policy_next_obs = filter_policy_observation(next_obs, policy)
+                policy_next_obs = {key: value for key, value in next_obs.items() if key in policy.config.input_features}
                 executed_action = new_transition[TransitionKey.ACTION]
 
                 transition_payload = Transition(
@@ -324,14 +326,14 @@ def act_with_policy(
                 if step_counter.all_finished:
                     break
 
-                transition = mp_net.reset()
+                transition = env.reset()
                 segment_state = reset_segment_state()
 
             if cfg.env.fps is not None:
                 dt = time.perf_counter() - step_start_t
                 precise_sleep(max(1 / cfg.env.fps - dt, 0.0))
     finally:
-        mp_net.close()
+        env.close()
 
     return {
         "global_step": step_counter.global_step,
@@ -384,6 +386,7 @@ def learner_service_client(
     host: str,
     port: int,
 ) -> tuple[services_pb2_grpc.LearnerServiceStub, grpc.Channel]:
+    sanitize_local_grpc_proxy_env(host)
     channel = grpc.insecure_channel(f"{host}:{port}", grpc_channel_options())
     stub = services_pb2_grpc.LearnerServiceStub(channel)
     return stub, channel
@@ -510,4 +513,5 @@ def _use_threads(policy_cfg: SACConfig) -> bool:
 
 
 if __name__ == "__main__":
+    import experiments
     actor_cli()

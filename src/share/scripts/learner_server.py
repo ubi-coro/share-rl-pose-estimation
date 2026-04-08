@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-from __future__ import annotations
-
 import logging
 import os
 import queue
@@ -13,7 +11,6 @@ from typing import Any
 
 import grpc
 import torch
-from torch import nn
 from torch.multiprocessing import Queue
 from torch.optim import Optimizer
 
@@ -32,14 +29,15 @@ from lerobot.utils.train_utils import get_step_checkpoint_dir, save_checkpoint, 
 from lerobot.utils.transition import move_state_dict_to_device, move_transition_to_device
 from lerobot.utils.utils import get_safe_torch_device, init_logging
 
+from share.configs.rl import MPNetTrainRLServerPipelineConfig
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import (
     ManipulationPrimitiveNet,
 )
-from share.scripts.mpn_rl_runtime import (
-    MPNetTrainRLServerPipelineConfig,
+from share.rl.runtime import (
     build_adaptive_registry,
     make_policies_for_registry,
 )
+from share.utils.control_utils import suppress_logging
 
 
 @parser.wrap()
@@ -148,11 +146,12 @@ def add_actor_information_and_train(
     device = str(get_safe_torch_device(registry.actor_learner_policy_cfg.device, log=True))
     storage_device = str(get_safe_torch_device(registry.actor_learner_policy_cfg.storage_device))
 
-    mp_net = ManipulationPrimitiveNet(cfg.env)
-    try:
-        policies = make_policies_for_registry(mp_net.config, registry, train_mode=True)
-    finally:
-        mp_net.close()
+    with suppress_logging():
+        mp_net = ManipulationPrimitiveNet(cfg.env)
+        try:
+            policies = make_policies_for_registry(cfg.env, registry, train_mode=True)
+        finally:
+            mp_net.close()
 
     optimizers = {primitive_id: make_optimizers(policy) for primitive_id, policy in policies.items()}
     replay_buffers = {
@@ -582,4 +581,5 @@ def _use_threads(policy_cfg: SACPolicy | Any) -> bool:
 
 
 if __name__ == "__main__":
+    import experiments
     train_cli()

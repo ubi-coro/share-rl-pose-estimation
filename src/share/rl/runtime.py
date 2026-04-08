@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import os
 import queue
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,28 +20,6 @@ from lerobot.utils.transition import move_state_dict_to_device
 from share.envs.manipulation_primitive_net.config_manipulation_primitive_net import (
     ManipulationPrimitiveNetConfig,
 )
-
-
-@dataclass(kw_only=True)
-class MPNetTrainRLServerPipelineConfig(TrainRLServerPipelineConfig):
-    """Train config for MP-Net distributed SAC actor/learner servers."""
-
-    env: ManipulationPrimitiveNetConfig
-    dataset: DatasetConfig | None = None
-    policy: SACConfig | None = None
-
-    def validate(self) -> None:
-        if not self.job_name:
-            self.job_name = f"{self.env.type}_sac"
-
-        if self.output_dir is None:
-            now = dt.datetime.now()
-            self.output_dir = Path(f"outputs/train/{now:%Y-%m-%d}/{now:%H-%M-%S}_{self.job_name}")
-        else:
-            self.output_dir = Path(self.output_dir)
-
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        _ = build_adaptive_registry(self.env, self.policy)
 
 
 @dataclass(slots=True)
@@ -179,13 +158,6 @@ def make_policies_for_registry(
     return policies
 
 
-def filter_policy_observation(
-    observation: dict[str, torch.Tensor],
-    policy: SACPolicy,
-) -> dict[str, torch.Tensor]:
-    return {key: value for key, value in observation.items() if key in policy.config.input_features}
-
-
 def apply_parameter_updates_from_queue(
     *,
     policies: dict[str, SACPolicy],
@@ -219,3 +191,19 @@ def apply_parameter_updates_from_queue(
             policies[primitive_id].discrete_critic.load_state_dict(discrete_state)
 
     return consumed
+
+
+def sanitize_local_grpc_proxy_env(host: str) -> None:
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return
+
+    for key in ["http_proxy", "https_proxy", "grpc_proxy", "HTTP_PROXY", "HTTPS_PROXY", "GRPC_PROXY"]:
+        os.environ.pop(key, None)
+
+    for key in ["no_proxy", "NO_PROXY", "no_grpc_proxy", "NO_GRPC_PROXY"]:
+        current = os.environ.get(key, "")
+        items = [x.strip() for x in current.split(",") if x.strip()]
+        for needed in ["localhost", "127.0.0.1", "::1"]:
+            if needed not in items:
+                items.append(needed)
+        os.environ[key] = ",".join(items)

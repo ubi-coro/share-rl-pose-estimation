@@ -45,7 +45,8 @@ dependencies = [
     "modern_robotics>=1.1.1,<2.0.0",
     "scipy>=1.11.0,<2.0.0",
     "atomics>=1.0.0",
-    "pyrealsense2>=2.56.5"
+    "pyrealsense2>=2.56.5",
+    "grpcio>=1.80.0"
 ]
 
 [project.optional-dependencies]

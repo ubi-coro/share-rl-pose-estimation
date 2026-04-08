@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from share.configs.rl import MPNetTrainRLServerPipelineConfig
+
 os.environ.setdefault("PYNPUT_BACKEND", "dummy")
 
 from lerobot.policies.sac.configuration_sac import (  # noqa: E402
@@ -34,8 +36,7 @@ from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import
 )
 from share.envs.manipulation_primitive_net.transitions import Always, OnTimeLimit  # noqa: E402
 from share.scripts.actor_server import run_actor  # noqa: E402
-from share.scripts.learner_server import run_learner  # noqa: E402
-from share.scripts.mpn_rl_runtime import MPNetTrainRLServerPipelineConfig  # noqa: E402
+from share.scripts.learner_server import run_learner  # noqa: E402  # noqa: E402
 from share.utils.mock_utils import MockRobot, MockTeleoperator  # noqa: E402
 
 
