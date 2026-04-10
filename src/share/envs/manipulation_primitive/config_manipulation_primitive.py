@@ -120,7 +120,7 @@ class GripperConfig:
     mode: Literal["state", "pulse"] | dict[str, Literal["state", "pulse"]] = "state"
     max_pos: float | dict[str, float] = 1.0
     min_pos: float | dict[str, float] = 0.0
-    static_pos: float | dict[str, float] = 0.0
+    static_pos: float | dict[str, float | None] | None = None
     penalty: float | dict[str, float | None] | None = None
 
 
@@ -298,7 +298,8 @@ class ManipulationPrimitiveConfig(EnvConfig, ChoiceRegistry):
                 min_pos=self.processor.gripper.min_pos,
                 max_pos=self.processor.gripper.max_pos,
                 threshold=self.processor.gripper.threshold, 
-                discretize=self.processor.gripper.discretize
+                discretize=self.processor.gripper.discretize,
+                static_pos=self.processor.gripper.static_pos
             ),
         ])
 
@@ -511,6 +512,11 @@ class ManipulationPrimitiveConfig(EnvConfig, ChoiceRegistry):
         # if gripper.enable but the robot has no GRIPPER_KEY action feature, disable
         for name, robot in robot_dict.items():
             if self.processor.gripper.enable[name]:
+                if self.processor.gripper.static_pos[name]:
+                    raise ValueError(
+                        f"Gripper processing enabled for robot '{name}' but gripper is set to a static position."
+                    )
+
                 if not f"{GRIPPER_KEY}.pos" in robot.action_features:
                     raise ValueError(
                         f"Gripper processing enabled for robot '{name}' but no gripper action feature found. "

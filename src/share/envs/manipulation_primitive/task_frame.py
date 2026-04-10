@@ -10,7 +10,7 @@ class ControlSpace(IntEnum):
     """Target command space used by a task frame."""
 
     JOINT = 0
-    TASK = 1
+    TASK = 1  # xyz + rpy
 
 
 class PolicyMode(IntEnum):

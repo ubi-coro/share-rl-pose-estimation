@@ -293,8 +293,8 @@ class InterventionActionProcessorStep(ProcessorStep):
 
     teleoperators: dict[str, Any] = field(default_factory=dict)
     task_frame: dict[str, TaskFrame] = field(default_factory=dict)
-    gripper_enable: bool | dict[str, bool] = False
-    gripper_static_pos: float | dict[str, float] = 0.0
+    gripper_enable: dict[str, bool] = False
+    gripper_static_pos: dict[str, float | None] = field(default_factory=dict)
 
     def __post_init__(self):
         self._disable_torque_on_intervention = {name: hasattr(teleop, "bus") for name, teleop in self.teleoperators.items()}
@@ -335,6 +335,8 @@ class InterventionActionProcessorStep(ProcessorStep):
             full_action = self._project_policy_action(frame, source_actions[name])
             if self.gripper_enable[name] and f"{GRIPPER_KEY}.pos" in source_actions[name]:
                 full_action[f"{GRIPPER_KEY}.pos"] = source_actions[name][f"{GRIPPER_KEY}.pos"]
+            elif self.gripper_static_pos.get(name, None) is not None:
+                full_action[f"{GRIPPER_KEY}.pos"] = self.gripper_static_pos[name]
             full_action_dict[name] = full_action
 
         complementary_data[TELEOP_ACTION_KEY] = flatten_nested_policy_action(
@@ -478,6 +480,7 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
     min_pos: dict[str, float] = field(default_factory=dict)
     max_pos: dict[str, float] = field(default_factory=dict)
     threshold: dict[str, float] = field(default_factory=dict)
+    static_pos: dict[str, float | None] = field(default_factory=dict)
     mode: dict[str, Literal["state", "pulse"]] = field(default_factory=dict)
 
     _robot_names: list[str] = field(default_factory=list, init=False)
@@ -494,15 +497,14 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
             return transition
 
         new_transition = transition.copy()
-        new_action: dict[str, dict[str, Any]] = {}
-        for name, robot_action in action.items():
-            if not isinstance(robot_action, dict) or not self.discretize.get(name, False):
-                new_action[name] = robot_action
+        new_action = dict(action)
+        for name, robot_action in new_action.items():
+            print("static, ", self.static_pos.get(name, None))
+            if self.static_pos.get(name, None) is not None:
+                new_action[name][f"{GRIPPER_KEY}.pos"] = self.static_pos[name]
                 continue
 
-            robot_action_out = dict(robot_action)
-            if f"{GRIPPER_KEY}.pos" not in robot_action_out:
-                new_action[name] = robot_action_out
+            if not self.discretize.get(name, False) or f"{GRIPPER_KEY}.pos" not in robot_action:
                 continue
 
             # initialize gripper state
@@ -512,7 +514,7 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
                     self._robot_names.append(name)
 
             # update gripper state
-            input_val = robot_action_out[f"{GRIPPER_KEY}.pos"]
+            input_val = robot_action[f"{GRIPPER_KEY}.pos"]
             mode = self.mode.get(name, "state")
             threshold = self.threshold.get(name, 0.5)
             min_pos = self.min_pos.get(name, 0.0)
@@ -530,8 +532,8 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
             else:
                 raise ValueError(f"Unsupported gripper discretization mode '{mode}'")
 
-            robot_action_out[f"{GRIPPER_KEY}.pos"] = float(self._gripper_state[name])
-            new_action[name] = robot_action_out
+            robot_action[f"{GRIPPER_KEY}.pos"] = float(self._gripper_state[name])
+            new_action[name] = robot_action
 
         new_transition[TransitionKey.ACTION] = new_action
         return new_transition
