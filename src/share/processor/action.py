@@ -4,9 +4,9 @@ from typing import Any, Literal
 
 import numpy as np
 import torch
-from lerobot.types import EnvTransition, TransitionKey
 from scipy.spatial.transform import Rotation
 from lerobot.configs.types import PipelineFeatureType, PolicyFeature
+from lerobot.processor import EnvTransition, TransitionKey
 from lerobot.processor.hil_processor import TELEOP_ACTION_KEY, GRIPPER_KEY
 from lerobot.processor.pipeline import ProcessorStep, ProcessorStepRegistry
 
@@ -499,7 +499,7 @@ class DiscretizeGripperProcessorStep(ProcessorStep):
         new_transition = transition.copy()
         new_action = dict(action)
         for name, robot_action in new_action.items():
-            print("static, ", self.static_pos.get(name, None))
+            # print("static, ", self.static_pos.get(name, None))
             if self.static_pos.get(name, None) is not None:
                 new_action[name][f"{GRIPPER_KEY}.pos"] = self.static_pos[name]
                 continue

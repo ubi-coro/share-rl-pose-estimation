@@ -24,7 +24,7 @@ from share.envs.manipulation_primitive_net.config_manipulation_primitive_net imp
 from share.envs.manipulation_primitive_net.env_manipulation_primitive_net import ManipulationPrimitiveNet
 from share.envs.manipulation_primitive_net.transitions import OnSuccess, OnTargetPoseReached
 from share.robots.ur import URConfig
-from share.teleoperators.spacemouse import SpacemouseConfig
+from share.teleoperators.spacemouse import SpaceMouseConfig
 
 
 EVENTS = EventConfig(
@@ -111,7 +111,7 @@ net_cfg = ManipulationPrimitiveNetConfig(
         rt_core=3,
         use_gripper=True,
     ),
-    teleop=SpacemouseConfig(action_scale=[0.25, 0.25, 0.20, 0.50, 0.50, 0.50]),
+    teleop=SpaceMouseConfig(action_scale=[0.25, 0.25, 0.20, 0.50, 0.50, 0.50]),
     cameras={
         "main": RealSenseCameraConfig(serial_number_or_name="352122273250"),
     },

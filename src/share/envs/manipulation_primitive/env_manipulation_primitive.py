@@ -40,6 +40,7 @@ class ManipulationPrimitive(gymnasium.Env):
         self.current_step = 0
         self._motor_keys: set[str] = set()
         self._is_task_frame_robot: dict[str, bool] = check_task_frame_robot(robot_dict)
+        self._shared_runtime_values: dict[str, Any] | None = None
         self.reset_runtime_state()
         self.apply_task_frames()
         for name, robot in self.robot_dict.items():
@@ -125,6 +126,22 @@ class ManipulationPrimitive(gymnasium.Env):
         self._target_pose: dict[str, list[float]] = {}
         self._primitive_complete = False
         self._trajectory_progress = 0.0
+
+    def attach_shared_runtime_values(self, shared_runtime_values: dict[str, Any]) -> None:
+        """Attach MP-Net-scoped runtime values shared across primitive envs."""
+        self._shared_runtime_values = shared_runtime_values
+
+    def set_runtime_value(self, key: str, value: Any) -> None:
+        """Store a small runtime value that later primitives may read."""
+        if self._shared_runtime_values is None:
+            raise RuntimeError("Shared runtime values are not attached to this primitive env.")
+        self._shared_runtime_values[key] = value
+
+    def get_runtime_value(self, key: str, default: Any = None) -> Any:
+        """Read a runtime value previously written by another primitive."""
+        if self._shared_runtime_values is None:
+            return default
+        return self._shared_runtime_values.get(key, default)
 
     def set_target_pose(
         self,

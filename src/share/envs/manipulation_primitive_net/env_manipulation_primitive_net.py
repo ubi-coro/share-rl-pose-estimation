@@ -36,6 +36,7 @@ class ManipulationPrimitiveNet(gym.Env):
         self._env_processors = {}
         self._action_processors = {}
         self._transitions: dict[str, list[Transition]] = {}
+        self._shared_runtime_values: dict[str, Any] = {}
 
         for name, primitive in self.config.primitives.items():
             env, env_processor, action_processor = primitive.make(
@@ -48,6 +49,9 @@ class ManipulationPrimitiveNet(gym.Env):
             self._env_processors[name] = env_processor
             self._action_processors[name] = action_processor
             self._transitions[name] = []
+            attach_shared_runtime_values = getattr(env, "attach_shared_runtime_values", None)
+            if callable(attach_shared_runtime_values):
+                attach_shared_runtime_values(self._shared_runtime_values)
 
         for transition in self.config.transitions:
             self._transitions[transition.source].append(transition)
@@ -236,6 +240,7 @@ class ManipulationPrimitiveNet(gym.Env):
             )
             self._primitive_step_count = 0
             self._active = target
+            self._enter_active_primitive(None, None, None)
 
             processed_transition[TransitionKey.REWARD] += result.reward
             processed_transition[TransitionKey.DONE] |= result.terminated
@@ -306,6 +311,7 @@ class ManipulationPrimitiveNet(gym.Env):
         """
         self._pending_entry_context = None
         self._active = self.config.reset_primitive
+        self._shared_runtime_values.clear()
         for name, primitive in self.config.primitives.items():
             if name == self._active:
                 continue

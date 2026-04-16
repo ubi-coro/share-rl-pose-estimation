@@ -14,7 +14,10 @@ from scipy.spatial.transform import Rotation as R
 
 from share.envs.manipulation_primitive.task_frame import ControlMode, ControlSpace, PolicyMode, TaskFrame
 from share.utils.shared_memory import SharedMemoryRingBuffer, SharedMemoryQueue, Empty
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from share.robots.ur.lerobot_robot_ur.config_ur import URConfig
 
 # ---------------------------------------------------------------------------
 # Internal enums
@@ -69,6 +72,7 @@ class TaskFrameCommand(TaskFrame):
         try:
             d["cmd"] = self.cmd.value
             d.pop("policy_mode", None)
+            d.pop("joint_names", None)
             d["space"] = np.asarray(self.space).astype(np.int8)
             d["control_mode"] = np.array([int(m) if m is not None else -1 for m in self.control_mode])
             d["policy_mode"] = np.array([int(m) if m is not None else -1 for m in self.policy_mode])

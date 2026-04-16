@@ -106,6 +106,12 @@ The runtime publishes these stable info keys on every step/reset:
 - `primitive_complete`
 - `trajectory_progress`
 
+When primitives need to hand off a small runtime artifact that does not belong in
+the observation or transition info surface, they may write it into the
+primitive env's shared runtime-value store via `env.set_runtime_value(...)` and
+read it later with `env.get_runtime_value(...)`. This keeps config objects
+declarative while avoiding broader entry-context or info-surface churn.
+
 ## 8. Config-Defined Primitive Types
 
 The primitive config is a registry with three intended primitive families:
